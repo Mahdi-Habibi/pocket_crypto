@@ -959,19 +959,7 @@ async def handle_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
-def main() -> None:
-    base_dir = Path(__file__).resolve().parent
-    load_dotenv(dotenv_path=base_dir / ".env")
-
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is required.")
-
-    use_webhook = os.getenv("USE_WEBHOOK", "").lower() in {"1", "true", "yes"}
-    webhook_base = os.getenv("WEBHOOK_BASE_URL")
-    webhook_path = os.getenv("WEBHOOK_PATH", "/webhook")
-    port = int(os.getenv("PORT", "8080"))
-
+def build_application(token: str) -> Application:
     client = CoinMarketCapClient()
     job_queue = JobQueue()
     application = Application.builder().token(token).job_queue(job_queue).build()
@@ -1014,6 +1002,40 @@ def main() -> None:
             handle_symbol,
         )
     )
+
+    return application
+
+
+def load_settings() -> Dict[str, object]:
+    base_dir = Path(__file__).resolve().parent
+    load_dotenv(dotenv_path=base_dir / ".env")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is required.")
+
+    use_webhook = os.getenv("USE_WEBHOOK", "").lower() in {"1", "true", "yes"}
+    webhook_base = os.getenv("WEBHOOK_BASE_URL")
+    webhook_path = os.getenv("WEBHOOK_PATH", "/api/webhook")
+    port = int(os.getenv("PORT", "8080"))
+    return {
+        "token": token,
+        "use_webhook": use_webhook,
+        "webhook_base": webhook_base,
+        "webhook_path": webhook_path,
+        "port": port,
+    }
+
+
+def main() -> None:
+    settings = load_settings()
+    token = settings["token"]
+    use_webhook = settings["use_webhook"]
+    webhook_base = settings["webhook_base"]
+    webhook_path = settings["webhook_path"]
+    port = settings["port"]
+
+    application = build_application(token)
 
     logger.info("Bot is starting in %s mode", "webhook" if use_webhook else "polling")
 
