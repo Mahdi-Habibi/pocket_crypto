@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import time
@@ -515,9 +516,26 @@ def format_number(value: Optional[float], prefix: str = "", decimals: int = 2) -
         return "?"
 
 
+def format_price(value: Optional[float], prefix: str = "$") -> str:
+    if value is None:
+        return "?"
+    try:
+        if value <= 0:
+            return f"{prefix}0.00"
+        if value >= 1:
+            return f"{prefix}{value:,.2f}"
+
+        magnitude = -int(math.floor(math.log10(value)))
+        max_decimals = 12
+        decimals = min(max_decimals, max(2, magnitude + 2))
+        return f"{prefix}{value:,.{decimals}f}"
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+
+
 def format_quote(quote: Dict, lang: str) -> str:
     stats = quote.get("stats", {})
-    price = format_number(stats.get("price"), "$", 4 if stats.get("price", 0) < 1 else 2)
+    price = format_price(stats.get("price"))
     change_24h = stats.get("priceChangePercentage24h")
     market_cap = format_number(stats.get("marketCap"), "$", 0)
     volume = format_number(stats.get("volume24h"), "$", 0)
