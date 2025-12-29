@@ -1,5 +1,4 @@
 import logging
-import math
 from decimal import Decimal, InvalidOperation
 import os
 import re
@@ -528,15 +527,13 @@ def format_price(value: Optional[float], prefix: str = "$") -> str:
     try:
         if dec <= 0:
             return f"{prefix}0.00"
-        if dec >= 1:
-            return f"{prefix}{dec:,.2f}"
-
-        # For sub-dollar prices, show the full precision without scientific notation.
-        fixed = format(dec, "f")
-        fixed = fixed.rstrip("0") if "." in fixed else fixed
-        if fixed.endswith("."):
-            fixed += "0"
-        return f"{prefix}{fixed}"
+        fixed = format(dec, "f")  # show full precision without scientific notation
+        if "." in fixed:
+            integer, fractional = fixed.split(".", 1)
+        else:
+            integer, fractional = fixed, ""
+        integer_with_commas = f"{int(integer):,}" if integer else "0"
+        return f"{prefix}{integer_with_commas}" + (f".{fractional}" if fractional else "")
     except (TypeError, ValueError, OverflowError, InvalidOperation):
         return "?"
 
@@ -551,7 +548,6 @@ def format_quote(quote: Dict, lang: str) -> str:
 
     labels = get_language_data(lang)
     change_str = "?" if change_24h is None else f"{change_24h:+.2f}%"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
         f"{quote.get('name')} ({quote.get('symbol')})",
@@ -562,7 +558,6 @@ def format_quote(quote: Dict, lang: str) -> str:
     ]
     if rank:
         lines.append(f"{labels['quote_rank']}: #{rank}")
-    lines.append(f"{labels['quote_source']}: CoinMarketCap - {timestamp}")
     return "\n".join(lines)
 
 
@@ -604,7 +599,10 @@ async def automation_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
             )
     await update.message.reply_text(
-        translate(lang, "automation_prompt"), reply_markup=main_menu_keyboard(lang)
+        translate(lang, "automation_prompt"),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:auto")]]
+        ),
     )
     return AUTO_SYMBOL
 
@@ -1002,7 +1000,10 @@ def build_application(token: str) -> Application:
             MessageHandler(filters.Regex(automation_pattern), automation_start),
         ],
         states={
-            AUTO_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, automation_symbol)],
+            AUTO_SYMBOL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, automation_symbol),
+                CallbackQueryHandler(cancel_menu, pattern="^cancel:"),
+            ],
             AUTO_PERIOD: [
                 CallbackQueryHandler(automation_period_selection, pattern="^new:"),
                 CallbackQueryHandler(cancel_menu, pattern="^cancel:"),
