@@ -1,5 +1,6 @@
 import logging
 import math
+from decimal import Decimal, InvalidOperation
 import os
 import re
 import time
@@ -520,16 +521,23 @@ def format_price(value: Optional[float], prefix: str = "$") -> str:
     if value is None:
         return "?"
     try:
-        if value <= 0:
-            return f"{prefix}0.00"
-        if value >= 1:
-            return f"{prefix}{value:,.2f}"
+        dec = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return "?"
 
-        magnitude = -int(math.floor(math.log10(value)))
-        max_decimals = 12
-        decimals = min(max_decimals, max(2, magnitude + 2))
-        return f"{prefix}{value:,.{decimals}f}"
-    except (TypeError, ValueError, OverflowError):
+    try:
+        if dec <= 0:
+            return f"{prefix}0.00"
+        if dec >= 1:
+            return f"{prefix}{dec:,.2f}"
+
+        # For sub-dollar prices, show the full precision without scientific notation.
+        fixed = format(dec, "f")
+        fixed = fixed.rstrip("0") if "." in fixed else fixed
+        if fixed.endswith("."):
+            fixed += "0"
+        return f"{prefix}{fixed}"
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
         return "?"
 
 
