@@ -417,38 +417,29 @@ class CoinMarketCapClient:
             logger.exception("Failed fetching news for %s: %s", coin_id, exc)
             return []
 
-    def fetch_predictions(self, coin_id: Optional[int], limit: int = 5) -> list:
-        """Fetch prediction-related articles for the given coin id."""
-        if not coin_id:
+    def fetch_predictions(self, slug: Optional[str], limit: int = 5) -> list:
+        """Fetch price predictions from coin-predictions.com for the given slug."""
+        if not slug:
             return []
         try:
-            # reuse news feed but filter to prediction-focused pieces
-            resp = self.session.get(
-                self.NEWS_URL, params={"cryptocurrencyId": coin_id, "size": max(limit * 2, 10)}, timeout=10
-            )
-            resp.raise_for_status()
-            items = resp.json().get("data") or []
-            predictions = []
-            for item in items:
-                meta = item.get("meta") or {}
-                title = meta.get("title") or ""
-                if meta.get("cryptocurrencyId") and meta.get("cryptocurrencyId") != coin_id:
-                    continue
-                if "predict" not in title.lower() and "forecast" not in title.lower():
-                    continue
-                predictions.append(
-                    {
-                        "title": title,
-                        "url": meta.get("sourceUrl") or meta.get("url"),
-                        "source": meta.get("sourceName"),
-                        "published": meta.get("createdAt"),
-                    }
-                )
-                if len(predictions) >= limit:
+            resp = self.session.get(f"https://coin-predictions.com/{slug}/", timeout=10)
+            if resp.status_code != 200:
+                return []
+            html = resp.text
+            import html as html_lib
+            # Extract forecast statements like "2025 Forecast"
+            matches = re.findall(r"<strong>([^<]*?Forecast[^<]*?)</strong>\\s*&nbsp;?([^<]+)", html, flags=re.I)
+            items = []
+            for title_raw, body_raw in matches:
+                title = html_lib.unescape(re.sub("<.*?>", "", title_raw)).strip()
+                body = html_lib.unescape(re.sub("<.*?>", "", body_raw)).strip()
+                if title and body:
+                    items.append({"title": title, "description": body, "source": "coin-predictions.com"})
+                if len(items) >= limit:
                     break
-            return predictions
+            return items
         except requests.RequestException as exc:
-            logger.exception("Failed fetching predictions for %s: %s", coin_id, exc)
+            logger.exception("Failed fetching predictions for %s: %s", slug, exc)
             return []
 
     def _refresh_cache(self) -> None:
@@ -666,7 +657,7 @@ def build_quote_actions_keyboard(slug: str, coin_id: Optional[int], lang: str) -
     markets_cb = f"markets:{slug}"
     news_id = str(coin_id) if coin_id is not None else ""
     news_cb = f"news:{news_id}"
-    predictions_cb = f"predictions:{news_id}"
+    predictions_cb = f"predictions:{slug}"
     return InlineKeyboardMarkup(
         [
             [
@@ -720,12 +711,12 @@ def format_predictions(prediction_items: list, lang: str) -> str:
     for idx, item in enumerate(prediction_items, start=1):
         title = item.get("title") or "Untitled"
         source = item.get("source")
-        url = item.get("url") or ""
+        desc = item.get("description") or ""
         line = f"{idx}. {title}"
         if source:
             line += f" ({source})"
-        if url:
-            line += f"\n{url}"
+        if desc:
+            line += f"\n{desc}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -806,15 +797,10 @@ async def predictions_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     lang = get_user_language(context, query.from_user.id)
     await query.answer()
     parts = (query.data or "").split(":", 1)
-    coin_id: Optional[int] = None
-    if len(parts) == 2 and parts[1]:
-        try:
-            coin_id = int(parts[1])
-        except ValueError:
-            coin_id = None
+    slug = parts[1] if len(parts) == 2 and parts[1] else None
 
     client: CoinMarketCapClient = context.bot_data["cmc_client"]
-    predictions = client.fetch_predictions(coin_id)
+    predictions = client.fetch_predictions(slug)
     text = format_predictions(predictions, lang)
     if query.message:
         msg = await query.message.reply_text(text)
