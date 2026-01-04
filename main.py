@@ -94,10 +94,13 @@ TEXTS = {
         "quote_source": "Source",
         "button_markets": "Markets",
         "button_news": "Latest news",
+        "button_predictions": "Predictions",
         "markets_header": "Top markets",
         "markets_unavailable": "No market data available right now.",
         "news_header": "Latest news",
         "news_unavailable": "No news found right now.",
+        "predictions_header": "Price predictions",
+        "predictions_unavailable": "No predictions found right now.",
         "periods": {
             "hourly": "Hourly",
             "daily": "Daily",
@@ -414,6 +417,38 @@ class CoinMarketCapClient:
             logger.exception("Failed fetching news for %s: %s", coin_id, exc)
             return []
 
+    def fetch_predictions(self, coin_id: Optional[int], limit: int = 5) -> list:
+        """Fetch prediction-related articles for the given coin id."""
+        if not coin_id:
+            return []
+        try:
+            # reuse news feed but filter to prediction-focused pieces
+            resp = self.session.get(
+                self.NEWS_URL, params={"cryptocurrencyId": coin_id, "size": max(limit * 2, 10)}, timeout=10
+            )
+            resp.raise_for_status()
+            items = resp.json().get("data") or []
+            predictions = []
+            for item in items:
+                meta = item.get("meta") or {}
+                title = meta.get("title") or ""
+                if "predict" not in title.lower() and "forecast" not in title.lower():
+                    continue
+                predictions.append(
+                    {
+                        "title": title,
+                        "url": meta.get("sourceUrl") or meta.get("url"),
+                        "source": meta.get("sourceName"),
+                        "published": meta.get("createdAt"),
+                    }
+                )
+                if len(predictions) >= limit:
+                    break
+            return predictions
+        except requests.RequestException as exc:
+            logger.exception("Failed fetching predictions for %s: %s", coin_id, exc)
+            return []
+
     def _refresh_cache(self) -> None:
         cache_valid = time.time() - self._last_refresh < self.cache_seconds
         if self._symbol_cache and cache_valid:
@@ -629,11 +664,13 @@ def build_quote_actions_keyboard(slug: str, coin_id: Optional[int], lang: str) -
     markets_cb = f"markets:{slug}"
     news_id = str(coin_id) if coin_id is not None else ""
     news_cb = f"news:{news_id}"
+    predictions_cb = f"predictions:{news_id}"
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(translate(lang, "button_markets"), callback_data=markets_cb),
                 InlineKeyboardButton(translate(lang, "button_news"), callback_data=news_cb),
+                InlineKeyboardButton(translate(lang, "button_predictions"), callback_data=predictions_cb),
             ]
         ]
     )
@@ -662,6 +699,23 @@ def format_news(news_items: list, lang: str) -> str:
         return translate(lang, "news_unavailable")
     lines = [translate(lang, "news_header")]
     for idx, item in enumerate(news_items, start=1):
+        title = item.get("title") or "Untitled"
+        source = item.get("source")
+        url = item.get("url") or ""
+        line = f"{idx}. {title}"
+        if source:
+            line += f" ({source})"
+        if url:
+            line += f"\n{url}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_predictions(prediction_items: list, lang: str) -> str:
+    if not prediction_items:
+        return translate(lang, "predictions_unavailable")
+    lines = [translate(lang, "predictions_header")]
+    for idx, item in enumerate(prediction_items, start=1):
         title = item.get("title") or "Untitled"
         source = item.get("source")
         url = item.get("url") or ""
@@ -737,6 +791,29 @@ async def news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     client: CoinMarketCapClient = context.bot_data["cmc_client"]
     news_items = client.fetch_news(coin_id)
     text = format_news(news_items, lang)
+    if query.message:
+        msg = await query.message.reply_text(text)
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+async def predictions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    parts = (query.data or "").split(":", 1)
+    coin_id: Optional[int] = None
+    if len(parts) == 2 and parts[1]:
+        try:
+            coin_id = int(parts[1])
+        except ValueError:
+            coin_id = None
+
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    predictions = client.fetch_predictions(coin_id)
+    text = format_predictions(predictions, lang)
     if query.message:
         msg = await query.message.reply_text(text)
         if msg:
@@ -1176,6 +1253,7 @@ def build_application(token: str) -> Application:
     application.add_handler(automation_conv)
     application.add_handler(CallbackQueryHandler(markets_callback, pattern="^markets:"))
     application.add_handler(CallbackQueryHandler(news_callback, pattern="^news:"))
+    application.add_handler(CallbackQueryHandler(predictions_callback, pattern="^predictions:"))
     application.add_handler(CallbackQueryHandler(manage_callback, pattern="^(del|set):"))
     application.add_handler(CallbackQueryHandler(language_callback, pattern="^lang:"))
     application.add_handler(CallbackQueryHandler(cancel_menu, pattern="^cancel:"))
