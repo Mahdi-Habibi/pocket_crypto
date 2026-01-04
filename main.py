@@ -92,6 +92,12 @@ TEXTS = {
         "quote_volume": "24h Volume",
         "quote_rank": "Market Cap Rank",
         "quote_source": "Source",
+        "button_markets": "Markets",
+        "button_news": "Latest news",
+        "markets_header": "Top markets",
+        "markets_unavailable": "No market data available right now.",
+        "news_header": "Latest news",
+        "news_unavailable": "No news found right now.",
         "periods": {
             "hourly": "Hourly",
             "daily": "Daily",
@@ -318,6 +324,8 @@ class CoinMarketCapClient:
 
     LISTING_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing"
     DETAIL_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail"
+    MARKETS_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/market-pairs/latest"
+    NEWS_URL = "https://api.coinmarketcap.com/content/v3/news"
 
     def __init__(self, listing_limit: int = 5000, cache_seconds: int = 600):
         self.listing_limit = listing_limit
@@ -342,6 +350,7 @@ class CoinMarketCapClient:
             if not data:
                 return None
             return {
+                "id": data.get("id"),
                 "name": data.get("name"),
                 "symbol": data.get("symbol"),
                 "slug": slug,
@@ -350,6 +359,60 @@ class CoinMarketCapClient:
         except requests.RequestException as exc:
             logger.exception("Failed fetching detail for %s: %s", slug, exc)
             return None
+
+    def fetch_markets(self, slug: str, limit: int = 10) -> list:
+        """Fetch top markets (exchanges) where the coin trades."""
+        try:
+            resp = self.session.get(
+                self.MARKETS_URL, params={"slug": slug, "start": 1, "limit": limit}, timeout=10
+            )
+            resp.raise_for_status()
+            market_pairs = (resp.json().get("data") or {}).get("marketPairs") or []
+            markets = []
+            for pair in market_pairs:
+                base = pair.get("baseSymbol")
+                quote = pair.get("quoteSymbol")
+                pair_label = pair.get("marketPair") or (
+                    f"{base}/{quote}" if base and quote else None
+                )
+                markets.append(
+                    {
+                        "exchange": pair.get("exchangeName"),
+                        "pair": pair_label,
+                        "url": pair.get("marketUrl"),
+                        "volume": pair.get("volumeUsd"),
+                    }
+                )
+            return markets
+        except requests.RequestException as exc:
+            logger.exception("Failed fetching markets for %s: %s", slug, exc)
+            return []
+
+    def fetch_news(self, coin_id: Optional[int], limit: int = 5) -> list:
+        """Fetch latest news for the given coin id."""
+        if not coin_id:
+            return []
+        try:
+            resp = self.session.get(
+                self.NEWS_URL, params={"cryptocurrencyId": coin_id, "size": limit}, timeout=10
+            )
+            resp.raise_for_status()
+            items = resp.json().get("data") or []
+            news = []
+            for item in items:
+                meta = item.get("meta") or {}
+                news.append(
+                    {
+                        "title": meta.get("title"),
+                        "url": meta.get("sourceUrl") or meta.get("url"),
+                        "source": meta.get("sourceName"),
+                        "published": meta.get("createdAt"),
+                    }
+                )
+            return news
+        except requests.RequestException as exc:
+            logger.exception("Failed fetching news for %s: %s", coin_id, exc)
+            return []
 
     def _refresh_cache(self) -> None:
         cache_valid = time.time() - self._last_refresh < self.cache_seconds
@@ -500,6 +563,7 @@ async def send_automation_update(context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = await context.bot.send_message(
         chat_id=context.job.chat_id,
         text=f"{translate(lang, 'automation_prefix', period=period_label)}\n{format_quote(quote, lang)}",
+        reply_markup=build_quote_actions_keyboard(slug or "", quote.get("id"), lang),
     )
     if msg:
         schedule_delete_message(
@@ -561,6 +625,55 @@ def format_quote(quote: Dict, lang: str) -> str:
     return "\n".join(lines)
 
 
+def build_quote_actions_keyboard(slug: str, coin_id: Optional[int], lang: str) -> InlineKeyboardMarkup:
+    markets_cb = f"markets:{slug}"
+    news_id = str(coin_id) if coin_id is not None else ""
+    news_cb = f"news:{news_id}"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(translate(lang, "button_markets"), callback_data=markets_cb),
+                InlineKeyboardButton(translate(lang, "button_news"), callback_data=news_cb),
+            ]
+        ]
+    )
+
+
+def format_markets(markets: list, lang: str) -> str:
+    if not markets:
+        return translate(lang, "markets_unavailable")
+    lines = [translate(lang, "markets_header")]
+    for idx, item in enumerate(markets, start=1):
+        exchange = item.get("exchange") or "?"
+        pair = item.get("pair") or ""
+        url = item.get("url") or ""
+        volume = item.get("volume")
+        pair_part = f" ({pair})" if pair else ""
+        volume_part = f" | Vol: {format_number(volume, '$', 0)}" if volume else ""
+        line = f"{idx}. {exchange}{pair_part}{volume_part}"
+        if url:
+            line += f" - {url}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_news(news_items: list, lang: str) -> str:
+    if not news_items:
+        return translate(lang, "news_unavailable")
+    lines = [translate(lang, "news_header")]
+    for idx, item in enumerate(news_items, start=1):
+        title = item.get("title") or "Untitled"
+        source = item.get("source")
+        url = item.get("url") or ""
+        line = f"{idx}. {title}"
+        if source:
+            line += f" ({source})"
+        if url:
+            line += f"\n{url}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = get_user_language(context, update.effective_user.id)
     if update.message and update.message.text and update.message.text.startswith("/"):
@@ -589,6 +702,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ),
         reply_markup=main_menu_keyboard(lang),
     )
+
+
+async def markets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    parts = (query.data or "").split(":", 1)
+    slug = parts[1] if len(parts) == 2 and parts[1] else None
+
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    markets = client.fetch_markets(slug) if slug else []
+    text = format_markets(markets, lang)
+    if query.message:
+        msg = await query.message.reply_text(text)
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+async def news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    parts = (query.data or "").split(":", 1)
+    coin_id: Optional[int] = None
+    if len(parts) == 2 and parts[1]:
+        try:
+            coin_id = int(parts[1])
+        except ValueError:
+            coin_id = None
+
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    news_items = client.fetch_news(coin_id)
+    text = format_news(news_items, lang)
+    if query.message:
+        msg = await query.message.reply_text(text)
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
 
 
 async def automation_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -972,7 +1126,8 @@ async def handle_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     reply = await update.message.reply_text(
-        format_quote(quote, lang), reply_markup=main_menu_keyboard(lang)
+        format_quote(quote, lang),
+        reply_markup=build_quote_actions_keyboard(slug, quote.get("id"), lang),
     )
     if reply:
         schedule_delete_message(
@@ -1019,6 +1174,8 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("manageautomation", manage_automation))
     application.add_handler(MessageHandler(filters.Regex(manage_pattern), manage_automation))
     application.add_handler(automation_conv)
+    application.add_handler(CallbackQueryHandler(markets_callback, pattern="^markets:"))
+    application.add_handler(CallbackQueryHandler(news_callback, pattern="^news:"))
     application.add_handler(CallbackQueryHandler(manage_callback, pattern="^(del|set):"))
     application.add_handler(CallbackQueryHandler(language_callback, pattern="^lang:"))
     application.add_handler(CallbackQueryHandler(cancel_menu, pattern="^cancel:"))
