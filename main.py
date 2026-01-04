@@ -432,6 +432,8 @@ class CoinMarketCapClient:
             for item in items:
                 meta = item.get("meta") or {}
                 title = meta.get("title") or ""
+                if meta.get("cryptocurrencyId") and meta.get("cryptocurrencyId") != coin_id:
+                    continue
                 if "predict" not in title.lower() and "forecast" not in title.lower():
                     continue
                 predictions.append(
@@ -670,8 +672,8 @@ def build_quote_actions_keyboard(slug: str, coin_id: Optional[int], lang: str) -
             [
                 InlineKeyboardButton(translate(lang, "button_markets"), callback_data=markets_cb),
                 InlineKeyboardButton(translate(lang, "button_news"), callback_data=news_cb),
-                InlineKeyboardButton(translate(lang, "button_predictions"), callback_data=predictions_cb),
-            ]
+            ],
+            [InlineKeyboardButton(translate(lang, "button_predictions"), callback_data=predictions_cb)],
         ]
     )
 
