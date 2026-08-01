@@ -39,8 +39,9 @@ Set these in the Vercel project **Settings → Environment Variables** for Produ
 
 After changing env vars, **redeploy** Production so the new values are picked up.
 
-### Rotate `TELEGRAM_BOT_TOKEN` (Vercel “Needs attention”)
-If Vercel flags `TELEGRAM_BOT_TOKEN` for rotation (security incident or leaked secret):
+### Fix GitHub alert “Telegram Bot Token #1” (+ Vercel rotation)
+GitHub secret scanning flagged a bot token that was once committed in `.env` / `.env.example`.
+History on `main` has been rewritten to remove it, but **the alert stays open until the token is revoked and you close the alert**.
 
 1. Open [@BotFather](https://t.me/BotFather) → `/mybots` → **CryptoInYourPocketbot** → **API Token** → **Revoke current token**.
 2. Copy the new token.
@@ -56,8 +57,10 @@ If Vercel flags `TELEGRAM_BOT_TOKEN` for rotation (security incident or leaked s
    ./scripts/set_webhook.sh
    ```
 6. Verify: `curl https://cryptoinyourpocketbot.vercel.app/api/webhook` should return `ok`.
+7. In GitHub → **Security** → **Secret scanning** → **Telegram Bot Token #1** → **Close as → Revoked**.
+8. Optional: ask [GitHub Support](https://support.github.com) to purge cached views of old commit `0e3f325` / PR #1 refs so orphan SHAs disappear from `raw.githubusercontent.com`.
 
-> Never commit real tokens. A previous `.env` commit exposed a bot token in git history; always rotate after any leak.
+> Never commit real tokens. Always rotate after any leak.
 
 ### Production URL
 Webhook endpoint: `https://cryptoinyourpocketbot.vercel.app/api/webhook`
