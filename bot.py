@@ -1,16 +1,18 @@
+"""Pocket Crypto — advanced Telegram market bot."""
+
+from __future__ import annotations
+
+import html
 import logging
-from decimal import Decimal, InvalidOperation
 import os
 import re
-import time
-from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,274 +24,55 @@ from telegram.ext import (
     filters,
 )
 
+from cmc import CoinMarketCapClient
+from i18n import (
+    DEFAULT_LANGUAGE,
+    LANGUAGE_OPTIONS,
+    TEXTS,
+    button_labels,
+    get_language_data,
+    get_period_label,
+    translate,
+)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-AUTO_SYMBOL, AUTO_PERIOD = range(2)
-DEFAULT_LANGUAGE = "en"
+AUTO_SYMBOL, AUTO_PERIOD, ALERT_TARGET = range(3)
 COMMAND_DELETE_SECONDS = 5
-MENU_DELETE_SECONDS = 5
+MENU_DELETE_SECONDS = 8
 MANUAL_QUOTE_DELETE_SECONDS = 60 * 60 * 24
+WATCHLIST_LIMIT = 12
+ALERT_LIMIT = 12
+ALERT_CHECK_SECONDS = 120
 
-LANGUAGE_OPTIONS = {
-    "en": {"label": "English", "emoji": "🇺🇸"},
-    "es": {"label": "Español", "emoji": "🇪🇸"},
-    "zh": {"label": "中文", "emoji": "🇨🇳"},
-    "fa": {"label": "فارسی", "emoji": "🇮🇷"},
+PERIOD_SECONDS = {
+    "hourly": 60 * 60,
+    "daily": 60 * 60 * 24,
+    "weekly": 60 * 60 * 24 * 7,
+    "monthly": 60 * 60 * 24 * 30,
 }
 
-TEXTS = {
-    "en": {
-        "menu_automation": "🤖 Automation",
-        "menu_manage": "🗂️ Manage automations",
-        "menu_settings": "⚙️ Settings",
-        "start": (
-            "Hi! Send me a crypto or stablecoin symbol (e.g., BTC, USDT, TON) "
-            "and I'll fetch the latest info from CoinMarketCap. "
-            "You can keep sending symbols to get fresh updates."
-        ),
-        "help": (
-            "Use the menu buttons or commands:\n"
-            "- {automation}\n"
-            "- {manage}\n"
-            "- {settings}\n"
-            "Or send a symbol like BTC/USDT for immediate data."
-        ),
-        "automation_prompt": "Automation setup: send a symbol (e.g., BTC, USDT, TON).",
-        "invalid_symbol": "Please send a valid symbol (letters/numbers only).",
-        "symbol_not_found": "Couldn't find {symbol} on CoinMarketCap. Try another ticker?",
-        "choose_frequency": "Great, {symbol} found. Choose how often to send updates:",
-        "invalid_selection": "Invalid selection. Please restart Automation.",
-        "missing_data": "Missing data. Please restart Automation.",
-        "automation_created": (
-            "Automation created for {symbol} ({period}). ID: {automation_id}. "
-            "Use {manage_label} to view or adjust."
-        ),
-        "automation_prefix": "[{period} automation]",
-        "no_automations": "You have no automations. Use {automation_label} to create one.",
-        "automation_list_header": "Your automations:",
-        "automation_line": "- ID {automation_id}: {symbol} ({period}) every {every_hours}h",
-        "delete_button": "Delete #{automation_id} ({symbol})",
-        "invalid_action": "Invalid action.",
-        "invalid_id": "Invalid automation id.",
-        "automation_missing": "Automation not found.",
-        "deleted_automation": "Deleted automation #{automation_id}.",
-        "invalid_period": "Invalid period selection.",
-        "updated_period": "Updated automation #{automation_id} to {period}.",
-        "automation_cancelled": "Automation setup cancelled.",
-        "fetch_unavailable": "Automation for {symbol}: unable to fetch data right now.",
-        "manual_fetch_fail": "I couldn't fetch live data right now. Please try again.",
-        "invalid_language": "Invalid language selection.",
-        "cancel_button": "❌ Cancel",
-        "cancelled": "Cancelled.",
-        "language_prompt": "Choose your language:",
-        "language_updated": "Language changed to {language}.",
-        "quote_price": "Price",
-        "quote_change": "24h Change",
-        "quote_marketcap": "Market Cap",
-        "quote_volume": "24h Volume",
-        "quote_rank": "Market Cap Rank",
-        "quote_source": "Source",
-        "button_markets": "Markets",
-        "button_news": "Latest news",
-        "button_predictions": "Predictions",
-        "markets_header": "Top markets",
-        "markets_unavailable": "No market data available right now.",
-        "news_header": "Latest news",
-        "news_unavailable": "No news found right now.",
-        "predictions_header": "Price predictions",
-        "predictions_unavailable": "No predictions found right now.",
-        "periods": {
-            "hourly": "Hourly",
-            "daily": "Daily",
-            "weekly": "Weekly",
-            "monthly": "Monthly",
-        },
-    },
-    "es": {
-        "menu_automation": "🤖 Automatización",
-        "menu_manage": "🗂️ Gestionar automatizaciones",
-        "menu_settings": "⚙️ Ajustes",
-        "start": (
-            "¡Hola! Envíame un símbolo de cripto o stablecoin (ej. BTC, USDT, TON) "
-            "y obtendré la información de CoinMarketCap. "
-            "Puedes seguir enviando símbolos para obtener nuevas actualizaciones."
-        ),
-        "help": (
-            "Usa los botones del menú o comandos:\n"
-            "- {automation}\n"
-            "- {manage}\n"
-            "- {settings}\n"
-            "O envía un símbolo como BTC/USDT para datos inmediatos."
-        ),
-        "automation_prompt": "Configurar automatización: envía un símbolo (ej. BTC, USDT, TON).",
-        "invalid_symbol": "Envía un símbolo válido (solo letras/números).",
-        "symbol_not_found": "No encontré {symbol} en CoinMarketCap. ¿Pruebas otro ticker?",
-        "choose_frequency": "Listo, {symbol} encontrado. Elige cada cuánto enviar actualizaciones:",
-        "invalid_selection": "Selección inválida. Reinicia Automatización.",
-        "missing_data": "Faltan datos. Reinicia Automatización.",
-        "automation_created": (
-            "Automatización creada para {symbol} ({period}). ID: {automation_id}. "
-            "Usa {manage_label} para ver o ajustar."
-        ),
-        "automation_prefix": "[Automatización {period}]",
-        "no_automations": "No tienes automatizaciones. Usa {automation_label} para crear una.",
-        "automation_list_header": "Tus automatizaciones:",
-        "automation_line": "- ID {automation_id}: {symbol} ({period}) cada {every_hours}h",
-        "delete_button": "Eliminar #{automation_id} ({symbol})",
-        "invalid_action": "Acción inválida.",
-        "invalid_id": "ID de automatización inválido.",
-        "automation_missing": "Automatización no encontrada.",
-        "deleted_automation": "Automatización #{automation_id} eliminada.",
-        "invalid_period": "Selección de periodo inválida.",
-        "updated_period": "Automatización #{automation_id} actualizada a {period}.",
-        "automation_cancelled": "Configuración cancelada.",
-        "fetch_unavailable": "Automatización de {symbol}: no puedo obtener datos ahora.",
-        "manual_fetch_fail": "No pude obtener datos en vivo ahora. Inténtalo de nuevo.",
-        "invalid_language": "Selección de idioma inválida.",
-        "cancel_button": "❌ Cancelar",
-        "cancelled": "Cancelado.",
-        "language_prompt": "Elige tu idioma:",
-        "language_updated": "Idioma cambiado a {language}.",
-        "quote_price": "Precio",
-        "quote_change": "Cambio 24h",
-        "quote_marketcap": "Capitalización",
-        "quote_volume": "Volumen 24h",
-        "quote_rank": "Rango de capitalización",
-        "quote_source": "Fuente",
-        "periods": {
-            "hourly": "Cada hora",
-            "daily": "Diario",
-            "weekly": "Semanal",
-            "monthly": "Mensual",
-        },
-    },
-    "zh": {
-        "menu_automation": "🤖 自动更新",
-        "menu_manage": "🗂️ 管理更新",
-        "menu_settings": "⚙️ 设置",
-        "start": "你好！发送加密货币或稳定币代号（如 BTC、USDT、TON），我会提供 CoinMarketCap 的最新信息。",
-        "help": (
-            "使用菜单按钮或命令：\n"
-            "- {automation}\n"
-            "- {manage}\n"
-            "- {settings}\n"
-            "或发送如 BTC/USDT 获取即时数据。"
-        ),
-        "automation_prompt": "自动更新：发送代号（如 BTC、USDT、TON）。",
-        "invalid_symbol": "请发送有效的代号（仅限字母或数字）。",
-        "symbol_not_found": "在 CoinMarketCap 上找不到 {symbol}。换一个试试？",
-        "choose_frequency": "好的，找到 {symbol}。选择发送频率：",
-        "invalid_selection": "选择无效。请重新开始自动更新。",
-        "missing_data": "数据缺失。请重新开始自动更新。",
-        "automation_created": (
-            "已为 {symbol} 创建自动更新（{period}）。ID: {automation_id}。"
-            "使用 {manage_label} 查看或调整。"
-        ),
-        "automation_prefix": "[{period} 更新]",
-        "no_automations": "暂无自动更新。使用 {automation_label} 创建一个。",
-        "automation_list_header": "你的自动更新：",
-        "automation_line": "- ID {automation_id}: {symbol}（{period}）每 {every_hours} 小时",
-        "delete_button": "删除 #{automation_id}（{symbol}）",
-        "invalid_action": "无效操作。",
-        "invalid_id": "自动更新 ID 无效。",
-        "automation_missing": "未找到该自动更新。",
-        "deleted_automation": "已删除自动更新 #{automation_id}。",
-        "invalid_period": "无效的周期选择。",
-        "updated_period": "自动更新 #{automation_id} 已改为 {period}。",
-        "automation_cancelled": "已取消设置。",
-        "fetch_unavailable": "关于 {symbol} 的自动更新：现在无法获取数据。",
-        "manual_fetch_fail": "现在无法获取实时数据，请稍后再试。",
-        "invalid_language": "语言选择无效。",
-        "cancel_button": "❌ 取消",
-        "cancelled": "已取消。",
-        "language_prompt": "选择你的语言：",
-        "language_updated": "语言已切换为 {language}。",
-        "quote_price": "价格",
-        "quote_change": "24小时变化",
-        "quote_marketcap": "市值",
-        "quote_volume": "24小时成交量",
-        "quote_rank": "市值排名",
-        "quote_source": "来源",
-        "periods": {
-            "hourly": "每小时",
-            "daily": "每天",
-            "weekly": "每周",
-            "monthly": "每月",
-        },
-    },
-    "fa": {
-        "menu_automation": "🤖 خودکارسازی",
-        "menu_manage": "🗂️ مدیریت خودکارسازی‌ها",
-        "menu_settings": "⚙️ تنظیمات",
-        "start": "سلام! نماد کریپتو یا استیبل‌کوین (مثل BTC، USDT، TON) را بفرست تا آخرین اطلاعات CoinMarketCap را بگیرم.",
-        "help": (
-            "از دکمه‌های منو یا دستورها استفاده کن:\n"
-            "- {automation}\n"
-            "- {manage}\n"
-            "- {settings}\n"
-            "یا نمادی مثل BTC/USDT بفرست تا داده فوری بگیری."
-        ),
-        "automation_prompt": "راه‌اندازی خودکارسازی: یک نماد بفرست (مثل BTC، USDT، TON).",
-        "invalid_symbol": "لطفاً یک نماد معتبر بفرست (فقط حروف/اعداد).",
-        "symbol_not_found": "{symbol} در CoinMarketCap پیدا نشد. نماد دیگری امتحان کن؟",
-        "choose_frequency": "عالی، {symbol} پیدا شد. بازه‌ی ارسال را انتخاب کن:",
-        "invalid_selection": "انتخاب نامعتبر. خودکارسازی را دوباره شروع کن.",
-        "missing_data": "اطلاعات ناقص است. خودکارسازی را دوباره شروع کن.",
-        "automation_created": (
-            "خودکارسازی برای {symbol} ({period}) ساخته شد. شناسه: {automation_id}. "
-            "برای مشاهده یا تغییر از {manage_label} استفاده کن."
-        ),
-        "automation_prefix": "[به‌روزرسانی {period}]",
-        "no_automations": "خودکارسازی‌ای نداری. با {automation_label} یکی بساز.",
-        "automation_list_header": "خودکارسازی‌های تو:",
-        "automation_line": "- شناسه {automation_id}: {symbol} ({period}) هر {every_hours} ساعت",
-        "delete_button": "حذف #{automation_id} ({symbol})",
-        "invalid_action": "عملیات نامعتبر.",
-        "invalid_id": "شناسه خودکارسازی نامعتبر است.",
-        "automation_missing": "خودکارسازی پیدا نشد.",
-        "deleted_automation": "خودکارسازی #{automation_id} حذف شد.",
-        "invalid_period": "انتخاب بازه نامعتبر است.",
-        "updated_period": "خودکارسازی #{automation_id} به {period} تغییر کرد.",
-        "automation_cancelled": "تنظیمات لغو شد.",
-        "fetch_unavailable": "برای {symbol}: فعلاً نمی‌توانم داده بگیرم.",
-        "manual_fetch_fail": "الان نمی‌توانم داده زنده بگیرم. دوباره تلاش کن.",
-        "invalid_language": "انتخاب زبان نامعتبر است.",
-        "cancel_button": "❌ لغو",
-        "cancelled": "لغو شد.",
-        "language_prompt": "زبان خود را انتخاب کن:",
-        "language_updated": "زبان به {language} تغییر کرد.",
-        "quote_price": "قیمت",
-        "quote_change": "تغییر ۲۴ساعته",
-        "quote_marketcap": "ارزش بازار",
-        "quote_volume": "حجم ۲۴ساعته",
-        "quote_rank": "رتبه ارزش بازار",
-        "quote_source": "منبع",
-        "periods": {
-            "hourly": "ساعتی",
-            "daily": "روزانه",
-            "weekly": "هفتگی",
-            "monthly": "ماهانه",
-        },
-    },
-}
+MENU_KEYS = [
+    "menu_search",
+    "menu_discover",
+    "menu_watchlist",
+    "menu_alerts",
+    "menu_automation",
+    "menu_manage",
+    "menu_settings",
+]
+
+CONVERT_RE = re.compile(
+    r"^\s*(?P<amount>\d+(?:\.\d+)?)\s+(?P<symbol>[A-Za-z]{2,15})\s*$"
+)
 
 
-def get_language_data(lang: str) -> Dict:
-    return TEXTS.get(lang, TEXTS[DEFAULT_LANGUAGE])
-
-
-def translate(lang: str, key: str, **kwargs) -> str:
-    data = get_language_data(lang)
-    template = data.get(key) or TEXTS[DEFAULT_LANGUAGE].get(key, "")
-    return template.format(**kwargs)
-
-
-def get_period_label(lang: str, period: str) -> str:
-    data = get_language_data(lang).get("periods", {})
-    return data.get(period, TEXTS[DEFAULT_LANGUAGE]["periods"].get(period, period))
+# ---------------------------------------------------------------------------
+# Language / menu helpers
+# ---------------------------------------------------------------------------
 
 
 def get_user_language(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
@@ -302,10 +85,6 @@ def set_user_language(context: ContextTypes.DEFAULT_TYPE, user_id: int, lang: st
     selected = lang if lang in TEXTS else DEFAULT_LANGUAGE
     store[user_id] = selected
     return selected
-
-
-def button_labels(key: str) -> list:
-    return [lang_data.get(key) for lang_data in TEXTS.values() if lang_data.get(key)]
 
 
 def button_regex(key: str) -> str:
@@ -322,165 +101,365 @@ def combined_button_regex(keys) -> str:
     return "^(" + "|".join(escaped) + ")$"
 
 
-class CoinMarketCapClient:
-    """Lightweight client for public CoinMarketCap endpoints."""
+def is_menu_button_text(text: str) -> bool:
+    if not text:
+        return False
+    labels = set()
+    for key in MENU_KEYS:
+        labels.update(button_labels(key))
+    return text in labels
 
-    LISTING_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing"
-    DETAIL_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail"
-    MARKETS_URL = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/market-pairs/latest"
-    NEWS_URL = "https://api.coinmarketcap.com/content/v3/news"
 
-    def __init__(self, listing_limit: int = 5000, cache_seconds: int = 600):
-        self.listing_limit = listing_limit
-        self.cache_seconds = cache_seconds
-        self.session = requests.Session()
-        self._symbol_cache: Dict[str, str] = {}
-        self._last_refresh = 0.0
+def main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    data = get_language_data(lang)
+    return ReplyKeyboardMarkup(
+        [
+            [data["menu_search"], data["menu_discover"]],
+            [data["menu_watchlist"], data["menu_alerts"]],
+            [data["menu_automation"], data["menu_manage"]],
+            [data["menu_settings"]],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
-    def resolve_symbol(self, symbol: str) -> Optional[str]:
-        """Return CoinMarketCap slug for a given ticker symbol."""
-        self._refresh_cache()
-        return self._symbol_cache.get(symbol.upper())
 
-    def fetch_quote(self, slug: str) -> Optional[Dict]:
-        """Fetch detailed statistics for a specific coin slug."""
+def esc(value: object) -> str:
+    return html.escape("" if value is None else str(value), quote=False)
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+
+def format_number(value: Optional[float], prefix: str = "", decimals: int = 2) -> str:
+    if value is None:
+        return "?"
+    try:
+        abs_val = abs(float(value))
+        if abs_val >= 1_000_000_000_000:
+            return f"{prefix}{value / 1_000_000_000_000:,.2f}T"
+        if abs_val >= 1_000_000_000:
+            return f"{prefix}{value / 1_000_000_000:,.2f}B"
+        if abs_val >= 1_000_000:
+            return f"{prefix}{value / 1_000_000:,.2f}M"
+        if abs_val >= 1_000:
+            return f"{prefix}{value:,.2f}" if decimals else f"{prefix}{value:,.0f}"
+        return f"{prefix}{value:,.{decimals}f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def format_price(value: Optional[float], prefix: str = "$") -> str:
+    if value is None:
+        return "?"
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return "?"
+    try:
+        if dec <= 0:
+            return f"{prefix}0.00"
+        if dec >= 1000:
+            return f"{prefix}{dec:,.2f}"
+        if dec >= 1:
+            return f"{prefix}{dec:,.4f}".rstrip("0").rstrip(".")
+        # small prices: keep meaningful digits
+        fixed = format(dec, "f")
+        if "." in fixed:
+            integer, fractional = fixed.split(".", 1)
+            # trim trailing zeros but keep up to 8 significant fraction digits
+            fractional = fractional[:10].rstrip("0")
+            return f"{prefix}{integer}" + (f".{fractional}" if fractional else "")
+        return f"{prefix}{fixed}"
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
+        return "?"
+
+
+def change_badge(value: Optional[float]) -> str:
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    arrow = "▴" if num >= 0 else "▾"
+    return f"{arrow} {num:+.2f}%"
+
+
+def format_quote(quote: Dict, lang: str) -> str:
+    stats = quote.get("stats", {}) or {}
+    name = esc(quote.get("name") or "?")
+    symbol = esc(quote.get("symbol") or "?")
+    rank = stats.get("rank")
+    price = format_price(stats.get("price"))
+    c1h = change_badge(stats.get("priceChangePercentage1h"))
+    c24 = change_badge(stats.get("priceChangePercentage24h"))
+    c7d = change_badge(stats.get("priceChangePercentage7d"))
+    c30 = change_badge(stats.get("priceChangePercentage30d"))
+    mcap = format_number(stats.get("marketCap"), "$", 0)
+    vol = format_number(stats.get("volume24h"), "$", 0)
+    low = format_price(stats.get("low24h"))
+    high = format_price(stats.get("high24h"))
+    ath = format_price(stats.get("highAllTime"))
+    ath_chg = stats.get("highAllTimeChangePercentage")
+    circ = format_number(stats.get("circulatingSupply"), "", 0)
+    max_supply = stats.get("maxSupply")
+    supply = circ if max_supply is None else f"{circ} / {format_number(max_supply, '', 0)}"
+    fdv = format_number(stats.get("fullyDilutedMarketCap"), "$", 0)
+    dominance = stats.get("marketCapDominance")
+
+    lines = [
+        f"🪙 <b>{name}</b> · <code>{symbol}</code>",
+    ]
+    if rank:
+        lines.append(f"#{esc(rank)} · CoinMarketCap")
+    lines.extend(
+        [
+            "",
+            f"💰 <b>{esc(price)}</b>",
+            (
+                f"{translate(lang, 'quote_change_1h')} {esc(c1h)}"
+                f"   {translate(lang, 'quote_change_24h')} {esc(c24)}"
+            ),
+            (
+                f"{translate(lang, 'quote_change_7d')} {esc(c7d)}"
+                f"   {translate(lang, 'quote_change_30d')} {esc(c30)}"
+            ),
+            "",
+            f"📊 {translate(lang, 'quote_marketcap')}: <b>{esc(mcap)}</b>",
+            f"📦 {translate(lang, 'quote_volume')}: <b>{esc(vol)}</b>",
+            f"🏦 {translate(lang, 'quote_supply')}: <b>{esc(supply)}</b>",
+        ]
+    )
+    if fdv and fdv != "?":
+        lines.append(f"🧮 {translate(lang, 'quote_fdv')}: <b>{esc(fdv)}</b>")
+    if dominance is not None:
         try:
-            resp = self.session.get(
-                self.DETAIL_URL, params={"slug": slug}, timeout=10
+            lines.append(
+                f"📶 {translate(lang, 'quote_dominance')}: <b>{float(dominance):.2f}%</b>"
             )
-            resp.raise_for_status()
-            data = resp.json().get("data")
-            if not data:
-                return None
-            return {
-                "id": data.get("id"),
-                "name": data.get("name"),
-                "symbol": data.get("symbol"),
-                "slug": slug,
-                "stats": data.get("statistics") or {},
-            }
-        except requests.RequestException as exc:
-            logger.exception("Failed fetching detail for %s: %s", slug, exc)
-            return None
+        except (TypeError, ValueError):
+            pass
+    lines.append(f"↕ {translate(lang, 'quote_range')}: <b>{esc(low)}</b> — <b>{esc(high)}</b>")
+    if ath and ath != "?":
+        ath_line = f"🏆 {translate(lang, 'quote_ath')}: <b>{esc(ath)}</b>"
+        if ath_chg is not None:
+            ath_line += f" ({esc(change_badge(ath_chg))})"
+        lines.append(ath_line)
+    return "\n".join(lines)
 
-    def fetch_markets(self, slug: str, limit: int = 10) -> list:
-        """Fetch top markets (exchanges) where the coin trades."""
-        try:
-            resp = self.session.get(
-                self.MARKETS_URL, params={"slug": slug, "start": 1, "limit": limit}, timeout=10
+
+def format_compact_row(item: Dict) -> str:
+    symbol = esc(item.get("symbol") or "?")
+    name = esc(item.get("name") or symbol)
+    price = esc(format_price(item.get("price")))
+    chg = esc(change_badge(item.get("change_24h")))
+    return f"• <b>{symbol}</b> {name}\n  {price} · 24h {chg}"
+
+
+def format_movers(items: List[Dict], lang: str, header_key: str) -> str:
+    if not items:
+        return translate(lang, "movers_unavailable")
+    lines = [translate(lang, header_key), ""]
+    for item in items[:10]:
+        lines.append(format_compact_row(item))
+    return "\n".join(lines)
+
+
+def format_markets(markets: list, lang: str) -> str:
+    if not markets:
+        return translate(lang, "markets_unavailable")
+    lines = [translate(lang, "markets_header"), ""]
+    for idx, item in enumerate(markets, start=1):
+        exchange = esc(item.get("exchange") or "?")
+        pair = esc(item.get("pair") or "")
+        url = item.get("url") or ""
+        volume = item.get("volume")
+        pair_part = f" · {pair}" if pair else ""
+        volume_part = f" · Vol {esc(format_number(volume, '$', 0))}" if volume else ""
+        line = f"{idx}. <b>{exchange}</b>{pair_part}{volume_part}"
+        if url:
+            line += f"\n   {esc(url)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_news(news_items: list, lang: str) -> str:
+    if not news_items:
+        return translate(lang, "news_unavailable")
+    lines = [translate(lang, "news_header"), ""]
+    for idx, item in enumerate(news_items, start=1):
+        title = esc(item.get("title") or "Untitled")
+        source = esc(item.get("source") or "")
+        url = item.get("url") or ""
+        line = f"{idx}. <b>{title}</b>"
+        if source:
+            line += f" <i>({source})</i>"
+        if url:
+            line += f"\n{esc(url)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_predictions(prediction_items: list, lang: str) -> str:
+    if not prediction_items:
+        return translate(lang, "predictions_unavailable")
+    lines = [translate(lang, "predictions_header"), ""]
+    for idx, item in enumerate(prediction_items, start=1):
+        title = esc(item.get("title") or "Untitled")
+        source = esc(item.get("source") or "")
+        desc = esc(item.get("description") or "")
+        line = f"{idx}. <b>{title}</b>"
+        if source:
+            line += f" <i>({source})</i>"
+        if desc:
+            line += f"\n{desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_compare(quotes: List[Dict], lang: str) -> str:
+    lines = [translate(lang, "compare_header"), ""]
+    for quote in quotes:
+        stats = quote.get("stats") or {}
+        lines.append(
+            "• <b>{sym}</b> {name}\n  {price} · 24h {chg} · MCap {mcap}".format(
+                sym=esc(quote.get("symbol")),
+                name=esc(quote.get("name")),
+                price=esc(format_price(stats.get("price"))),
+                chg=esc(change_badge(stats.get("priceChangePercentage24h"))),
+                mcap=esc(format_number(stats.get("marketCap"), "$", 0)),
             )
-            resp.raise_for_status()
-            market_pairs = (resp.json().get("data") or {}).get("marketPairs") or []
-            markets = []
-            for pair in market_pairs:
-                base = pair.get("baseSymbol")
-                quote = pair.get("quoteSymbol")
-                pair_label = pair.get("marketPair") or (
-                    f"{base}/{quote}" if base and quote else None
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Keyboards
+# ---------------------------------------------------------------------------
+
+
+def build_quote_actions_keyboard(
+    slug: str,
+    coin_id: Optional[int],
+    symbol: str,
+    lang: str,
+    watched: bool = False,
+) -> InlineKeyboardMarkup:
+    news_id = str(coin_id) if coin_id is not None else ""
+    watch_label = translate(lang, "button_unwatch" if watched else "button_watch")
+    watch_cb = f"unwatch:{symbol}" if watched else f"watch:{symbol}"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(translate(lang, "button_refresh"), callback_data=f"refresh:{slug}"),
+                InlineKeyboardButton(watch_label, callback_data=watch_cb),
+            ],
+            [
+                InlineKeyboardButton(translate(lang, "button_markets"), callback_data=f"markets:{slug}"),
+                InlineKeyboardButton(translate(lang, "button_news"), callback_data=f"news:{news_id}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    translate(lang, "button_predictions"), callback_data=f"predictions:{slug}"
+                ),
+                InlineKeyboardButton(translate(lang, "button_alert"), callback_data=f"alertui:{symbol}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    translate(lang, "button_cmc"),
+                    url=f"https://coinmarketcap.com/currencies/{slug}/",
                 )
-                markets.append(
-                    {
-                        "exchange": pair.get("exchangeName"),
-                        "pair": pair_label,
-                        "url": pair.get("marketUrl"),
-                        "volume": pair.get("volumeUsd"),
-                    }
+            ],
+        ]
+    )
+
+
+def build_suggestion_keyboard(suggestions: List[Dict[str, str]]) -> InlineKeyboardMarkup:
+    rows = []
+    for item in suggestions:
+        symbol = item.get("symbol") or ""
+        name = item.get("name") or symbol
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{symbol} · {name}"[:64],
+                    callback_data=f"quote:{symbol}",
                 )
-            return markets
-        except requests.RequestException as exc:
-            logger.exception("Failed fetching markets for %s: %s", slug, exc)
-            return []
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
 
-    def fetch_news(self, coin_id: Optional[int], limit: int = 5) -> list:
-        """Fetch latest news for the given coin id."""
-        if not coin_id:
-            return []
-        try:
-            resp = self.session.get(
-                self.NEWS_URL, params={"cryptocurrencyId": coin_id, "size": limit}, timeout=10
-            )
-            resp.raise_for_status()
-            items = resp.json().get("data") or []
-            news = []
-            for item in items:
-                meta = item.get("meta") or {}
-                news.append(
-                    {
-                        "title": meta.get("title"),
-                        "url": meta.get("sourceUrl") or meta.get("url"),
-                        "source": meta.get("sourceName"),
-                        "published": meta.get("createdAt"),
-                    }
+
+def build_discover_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(translate(lang, "button_gainers"), callback_data="discover:gainers"),
+                InlineKeyboardButton(translate(lang, "button_losers"), callback_data="discover:losers"),
+            ],
+            [
+                InlineKeyboardButton(
+                    translate(lang, "button_trending"), callback_data="discover:trending"
+                ),
+                InlineKeyboardButton(translate(lang, "button_top"), callback_data="discover:top"),
+            ],
+            [InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:discover")],
+        ]
+    )
+
+
+def build_language_keyboard(current_lang: str) -> InlineKeyboardMarkup:
+    rows = []
+    for code, meta in LANGUAGE_OPTIONS.items():
+        mark = "✓ " if code == current_lang else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{mark}{meta['emoji']} {meta['label']}",
+                    callback_data=f"lang:{code}",
                 )
-            return news
-        except requests.RequestException as exc:
-            logger.exception("Failed fetching news for %s: %s", coin_id, exc)
-            return []
-
-    def fetch_predictions(self, slug: Optional[str], limit: int = 5) -> list:
-        """Fetch price predictions from coin-predictions.com for the given slug."""
-        if not slug:
-            return []
-        try:
-            resp = self.session.get(f"https://coin-predictions.com/{slug}/", timeout=10)
-            if resp.status_code != 200:
-                return []
-            html = resp.text
-            import html as html_lib
-            # Extract forecast statements like "2025 Forecast"
-            matches = re.findall(r"<strong>([^<]*?Forecast[^<]*?)</strong>\\s*&nbsp;?([^<]+)", html, flags=re.I)
-            items = []
-            for title_raw, body_raw in matches:
-                title = html_lib.unescape(re.sub("<.*?>", "", title_raw)).strip()
-                body = html_lib.unescape(re.sub("<.*?>", "", body_raw)).strip()
-                if title and body:
-                    items.append({"title": title, "description": body, "source": "coin-predictions.com"})
-                if len(items) >= limit:
-                    break
-            return items
-        except requests.RequestException as exc:
-            logger.exception("Failed fetching predictions for %s: %s", slug, exc)
-            return []
-
-    def _refresh_cache(self) -> None:
-        cache_valid = time.time() - self._last_refresh < self.cache_seconds
-        if self._symbol_cache and cache_valid:
-            return
-
-        params = {
-            "start": 1,
-            "limit": self.listing_limit,
-            "sortBy": "market_cap",
-            "sortType": "desc",
-            "convert": "USD",
-            "cryptoType": "all",
-            "tagType": "all",
-            "audited": False,
-        }
-        try:
-            resp = self.session.get(self.LISTING_URL, params=params, timeout=10)
-            resp.raise_for_status()
-            payload = resp.json().get("data", {})
-            listing = payload.get("cryptoCurrencyList", [])
-            mapping: Dict[str, str] = {}
-            for item in listing:
-                symbol = (item.get("symbol") or "").upper()
-                slug = item.get("slug")
-                if symbol and slug and symbol not in mapping:
-                    mapping[symbol] = slug
-            self._symbol_cache = mapping
-            self._last_refresh = time.time()
-            logger.info("Loaded %s symbols from CoinMarketCap", len(mapping))
-        except requests.RequestException as exc:
-            logger.exception("Failed refreshing symbol cache: %s", exc)
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton(translate(current_lang, "cancel_button"), callback_data="cancel:lang")]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
-PERIOD_SECONDS = {
-    "hourly": 60 * 60,
-    "daily": 60 * 60 * 24,
-    "weekly": 60 * 60 * 24 * 7,
-    "monthly": 60 * 60 * 24 * 30,
-}
+# ---------------------------------------------------------------------------
+# User stores: watchlist / alerts / automations
+# ---------------------------------------------------------------------------
+
+
+def get_watchlist(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> Dict[str, str]:
+    store = context.application.bot_data.setdefault("watchlists", {})
+    return store.setdefault(user_id, {})
+
+
+def get_alerts(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> Dict:
+    store = context.application.bot_data.setdefault("alerts", {})
+    return store.setdefault(user_id, {"counter": 1, "items": {}})
+
+
+def get_user_automations(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> Dict:
+    store = context.application.bot_data.setdefault("automations", {})
+    return store.setdefault(user_id, {"counter": 1, "items": {}})
+
+
+def schedule_delete_message(
+    job_queue: Optional[JobQueue], chat_id: int, message_id: int, delay: int
+) -> None:
+    if not job_queue:
+        return
+    job_queue.run_once(
+        delete_message_job,
+        when=delay,
+        data={"chat_id": chat_id, "message_id": message_id},
+        name=f"del-{chat_id}-{message_id}",
+    )
 
 
 async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -491,41 +470,711 @@ async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as exc:  # Telegram might have already removed it
+    except Exception as exc:
         logger.debug("delete_message_job failed for %s:%s -> %s", chat_id, message_id, exc)
 
 
-def schedule_delete_message(job_queue: JobQueue, chat_id: int, message_id: int, delay: int) -> None:
-    job_queue.run_once(
-        delete_message_job,
-        when=delay,
-        data={"chat_id": chat_id, "message_id": message_id},
-        name=f"del-{chat_id}-{message_id}",
+def maybe_delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message and update.message.text and update.message.text.startswith("/"):
+        schedule_delete_message(
+            context.job_queue,
+            update.message.chat_id,
+            update.message.message_id,
+            COMMAND_DELETE_SECONDS,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Core quote flow
+# ---------------------------------------------------------------------------
+
+
+async def send_quote_for_symbol(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    symbol: str,
+    *,
+    edit_message=None,
+) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    symbol = symbol.strip().upper()
+
+    if update.effective_chat:
+        try:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id, action=ChatAction.TYPING
+            )
+        except Exception:
+            pass
+
+    slug = client.resolve_symbol(symbol)
+    if not slug:
+        suggestions = client.suggest_symbols(symbol)
+        text = translate(lang, "symbol_not_found" if suggestions else "symbol_not_found_plain", symbol=esc(symbol))
+        markup = build_suggestion_keyboard(suggestions) if suggestions else None
+        if edit_message:
+            await edit_message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        elif update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=markup
+            )
+        else:
+            await update.effective_message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=markup
+            )
+        return
+
+    quote = client.fetch_quote(slug)
+    if not quote or "stats" not in quote or quote["stats"].get("price") is None:
+        text = translate(lang, "manual_fetch_fail")
+        if edit_message:
+            await edit_message.edit_text(text, parse_mode=ParseMode.HTML)
+        else:
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+        return
+
+    watched = symbol in get_watchlist(context, update.effective_user.id)
+    text = format_quote(quote, lang)
+    markup = build_quote_actions_keyboard(slug, quote.get("id"), symbol, lang, watched=watched)
+
+    if edit_message:
+        await edit_message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return
+
+    msg = await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True
+    )
+    if msg:
+        schedule_delete_message(
+            context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+        )
+
+
+# ---------------------------------------------------------------------------
+# Commands / menus
+# ---------------------------------------------------------------------------
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    await update.message.reply_text(
+        translate(lang, "start"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(lang),
     )
 
 
-def is_menu_button_text(text: str) -> bool:
-    if not text:
-        return False
-    return text in (
-        set(button_labels("menu_automation"))
-        | set(button_labels("menu_manage"))
-        | set(button_labels("menu_settings"))
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    await update.message.reply_text(
+        translate(
+            lang,
+            "help",
+            discover=translate(lang, "menu_discover"),
+            watchlist=translate(lang, "menu_watchlist"),
+            alerts=translate(lang, "menu_alerts"),
+            automation=translate(lang, "menu_automation"),
+            manage=translate(lang, "menu_manage"),
+            settings=translate(lang, "menu_settings"),
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(lang),
     )
 
 
-def main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    data = get_language_data(lang)
-    return ReplyKeyboardMarkup(
-        [[data["menu_automation"], data["menu_manage"]], [data["menu_settings"]]],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+async def search_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
+    await update.message.reply_text(
+        translate(lang, "search_prompt"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(lang),
     )
 
 
-def get_user_automations(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> Dict:
-    store = context.application.bot_data.setdefault("automations", {})
-    return store.setdefault(user_id, {"counter": 1, "items": {}})
+async def discover_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
+    await update.message.reply_text(
+        translate(lang, "discover_prompt"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_discover_keyboard(lang),
+    )
+
+
+async def discover_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    kind = (query.data or "").split(":", 1)[-1]
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+
+    if kind == "gainers":
+        items = client.fetch_movers("percent_change_24h", limit=10)
+        text = format_movers(items, lang, "gainers_header")
+    elif kind == "losers":
+        items = client.fetch_movers("percent_change_24h:asc", limit=10)
+        text = format_movers(items, lang, "losers_header")
+    elif kind == "trending":
+        items = client.fetch_movers("volume_24h", limit=10)
+        text = format_movers(items, lang, "trending_header")
+    else:
+        items = client.get_cached_listing(limit=10)
+        if not items:
+            items = client.fetch_movers("market_cap", limit=10)
+        text = format_movers(items, lang, "top_header")
+
+    # Quick-open buttons for top 5
+    rows = []
+    for item in items[:5]:
+        symbol = item.get("symbol")
+        if symbol:
+            rows.append(
+                [InlineKeyboardButton(f"Open {symbol}", callback_data=f"quote:{symbol}")]
+            )
+    rows.append(
+        [InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:discover")]
+    )
+    if query.message:
+        msg = await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    maybe_delete_command(update, context)
+    if not context.args:
+        await search_menu(update, context)
+        return
+    await send_quote_for_symbol(update, context, context.args[0])
+
+
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    symbols = [a.strip().upper() for a in (context.args or []) if a.strip()]
+    if len(symbols) < 2 or len(symbols) > 4:
+        await update.message.reply_text(
+            translate(lang, "compare_usage"), parse_mode=ParseMode.HTML
+        )
+        return
+
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    quotes = []
+    for symbol in symbols:
+        slug = client.resolve_symbol(symbol)
+        if not slug:
+            continue
+        quote = client.fetch_quote(slug)
+        if quote and quote.get("stats", {}).get("price") is not None:
+            quotes.append(quote)
+
+    if len(quotes) < 2:
+        await update.message.reply_text(
+            translate(lang, "compare_need_more"), parse_mode=ParseMode.HTML
+        )
+        return
+
+    await update.message.reply_text(
+        format_compare(quotes, lang),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(lang),
+    )
+
+
+async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    if len(context.args or []) < 2:
+        await update.message.reply_text(
+            translate(lang, "convert_usage"), parse_mode=ParseMode.HTML
+        )
+        return
+    try:
+        amount = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            translate(lang, "convert_usage"), parse_mode=ParseMode.HTML
+        )
+        return
+    symbol = context.args[1].upper()
+    await _send_conversion(update, context, amount, symbol)
+
+
+async def _send_conversion(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float, symbol: str
+) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    slug = client.resolve_symbol(symbol)
+    if not slug:
+        await update.effective_message.reply_text(
+            translate(lang, "symbol_not_found_plain", symbol=esc(symbol)),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    quote = client.fetch_quote(slug)
+    price = (quote or {}).get("stats", {}).get("price")
+    if price is None:
+        await update.effective_message.reply_text(
+            translate(lang, "manual_fetch_fail"), parse_mode=ParseMode.HTML
+        )
+        return
+    value = amount * float(price)
+    await update.effective_message.reply_text(
+        translate(
+            lang,
+            "convert_result",
+            amount=esc(amount),
+            symbol=esc(symbol),
+            value=esc(format_price(value)),
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Watchlist
+# ---------------------------------------------------------------------------
+
+
+async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
+    watchlist = get_watchlist(context, update.effective_user.id)
+    if not watchlist:
+        await update.effective_message.reply_text(
+            translate(lang, "watchlist_empty"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    lines = [translate(lang, "watchlist_header", count=len(watchlist)), ""]
+    rows = []
+    for symbol, slug in list(watchlist.items())[:WATCHLIST_LIMIT]:
+        quote = client.fetch_quote(slug)
+        stats = (quote or {}).get("stats") or {}
+        lines.append(
+            "• <b>{sym}</b> {price} · 24h {chg}".format(
+                sym=esc(symbol),
+                price=esc(format_price(stats.get("price"))),
+                chg=esc(change_badge(stats.get("priceChangePercentage24h"))),
+            )
+        )
+        rows.append([InlineKeyboardButton(f"Open {symbol}", callback_data=f"quote:{symbol}")])
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+    )
+
+
+async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    if not context.args:
+        await watchlist_command(update, context)
+        return
+    symbol = context.args[0].upper()
+    text = _add_watch(context, update.effective_user.id, symbol, lang)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    if not context.args:
+        await watchlist_command(update, context)
+        return
+    symbol = context.args[0].upper()
+    text = _remove_watch(context, update.effective_user.id, symbol, lang)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+def _add_watch(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, lang: str) -> str:
+    client: CoinMarketCapClient = context.application.bot_data["cmc_client"]
+    slug = client.resolve_symbol(symbol)
+    if not slug:
+        return translate(lang, "symbol_not_found_plain", symbol=esc(symbol))
+    watchlist = get_watchlist(context, user_id)
+    if symbol in watchlist:
+        return translate(lang, "watch_exists", symbol=esc(symbol))
+    if len(watchlist) >= WATCHLIST_LIMIT:
+        return translate(lang, "watch_limit", limit=WATCHLIST_LIMIT)
+    watchlist[symbol] = slug
+    return translate(lang, "watch_added", symbol=esc(symbol))
+
+
+def _remove_watch(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, lang: str) -> str:
+    watchlist = get_watchlist(context, user_id)
+    if symbol not in watchlist:
+        return translate(lang, "watch_missing", symbol=esc(symbol))
+    watchlist.pop(symbol, None)
+    return translate(lang, "watch_removed", symbol=esc(symbol))
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
+
+def _create_alert(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    symbol: str,
+    target: float,
+    direction: str,
+    lang: str,
+) -> str:
+    client: CoinMarketCapClient = context.application.bot_data["cmc_client"]
+    slug = client.resolve_symbol(symbol)
+    if not slug:
+        return translate(lang, "symbol_not_found_plain", symbol=esc(symbol))
+    if direction not in {"above", "below"}:
+        return translate(lang, "alert_invalid")
+
+    alerts = get_alerts(context, user_id)
+    if len(alerts["items"]) >= ALERT_LIMIT:
+        return translate(lang, "alert_limit", limit=ALERT_LIMIT)
+
+    alert_id = alerts["counter"]
+    alerts["counter"] += 1
+    alerts["items"][alert_id] = {
+        "symbol": symbol,
+        "slug": slug,
+        "target": target,
+        "direction": direction,
+        "chat_id": chat_id,
+    }
+    return translate(
+        lang,
+        "alert_created",
+        alert_id=alert_id,
+        symbol=esc(symbol),
+        direction=translate(lang, f"direction_{direction}"),
+        target=esc(format_price(target)),
+    )
+
+
+async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
+    alerts = get_alerts(context, update.effective_user.id)
+    items = alerts["items"]
+    if not items:
+        await update.effective_message.reply_text(
+            translate(lang, "alerts_empty"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    lines = [translate(lang, "alerts_header", count=len(items)), ""]
+    rows = []
+    for alert_id, item in items.items():
+        lines.append(
+            translate(
+                lang,
+                "alert_line",
+                alert_id=alert_id,
+                symbol=esc(item["symbol"]),
+                direction=translate(lang, f"direction_{item['direction']}"),
+                target=esc(format_price(item["target"])),
+            )
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    translate(
+                        lang,
+                        "delete_alert_button",
+                        alert_id=alert_id,
+                        symbol=item["symbol"],
+                    ),
+                    callback_data=f"adel:{alert_id}",
+                )
+            ]
+        )
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = get_user_language(context, update.effective_user.id)
+    maybe_delete_command(update, context)
+    args = context.args or []
+    if len(args) < 3:
+        await update.message.reply_text(
+            translate(lang, "alert_invalid"), parse_mode=ParseMode.HTML
+        )
+        return
+    symbol = args[0].upper()
+    try:
+        target = float(args[1].replace(",", "").replace("$", ""))
+    except ValueError:
+        await update.message.reply_text(
+            translate(lang, "alert_invalid"), parse_mode=ParseMode.HTML
+        )
+        return
+    direction = args[2].lower()
+    if direction in {"up", "over", ">"}:
+        direction = "above"
+    if direction in {"down", "under", "<"}:
+        direction = "below"
+    text = _create_alert(
+        context, update.effective_user.id, update.effective_chat.id, symbol, target, direction, lang
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def alert_target_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = get_user_language(context, update.effective_user.id)
+    symbol = context.user_data.get("alert_symbol")
+    if not symbol:
+        await update.message.reply_text(translate(lang, "alert_invalid"), parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    parts = (update.message.text or "").strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            translate(lang, "alert_prompt", symbol=esc(symbol)), parse_mode=ParseMode.HTML
+        )
+        return ALERT_TARGET
+    try:
+        target = float(parts[0].replace(",", "").replace("$", ""))
+    except ValueError:
+        await update.message.reply_text(
+            translate(lang, "alert_prompt", symbol=esc(symbol)), parse_mode=ParseMode.HTML
+        )
+        return ALERT_TARGET
+    direction = parts[1].lower()
+    if direction in {"up", "over", ">"}:
+        direction = "above"
+    if direction in {"down", "under", "<"}:
+        direction = "below"
+    text = _create_alert(
+        context, update.effective_user.id, update.effective_chat.id, symbol, target, direction, lang
+    )
+    context.user_data.pop("alert_symbol", None)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    client: CoinMarketCapClient = context.application.bot_data["cmc_client"]
+    all_alerts: Dict = context.application.bot_data.get("alerts") or {}
+    for user_id, bucket in list(all_alerts.items()):
+        lang = get_user_language(context, user_id)
+        for alert_id, item in list(bucket.get("items", {}).items()):
+            quote = client.fetch_quote(item["slug"])
+            price = (quote or {}).get("stats", {}).get("price")
+            if price is None:
+                continue
+            price = float(price)
+            target = float(item["target"])
+            direction = item["direction"]
+            hit = (direction == "above" and price >= target) or (
+                direction == "below" and price <= target
+            )
+            if not hit:
+                continue
+            bucket["items"].pop(alert_id, None)
+            try:
+                await context.bot.send_message(
+                    chat_id=item["chat_id"],
+                    text=translate(
+                        lang,
+                        "alert_triggered",
+                        symbol=esc(item["symbol"]),
+                        price=esc(format_price(price)),
+                        direction=translate(lang, f"direction_{direction}"),
+                        target=esc(format_price(target)),
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_quote_actions_keyboard(
+                        item["slug"],
+                        (quote or {}).get("id"),
+                        item["symbol"],
+                        lang,
+                        watched=item["symbol"] in get_watchlist(context, user_id),
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("Failed sending alert %s: %s", alert_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Detail callbacks
+# ---------------------------------------------------------------------------
+
+
+async def quote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    symbol = (query.data or "").split(":", 1)[-1]
+    await send_quote_for_symbol(update, context, symbol)
+
+
+async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer(translate(lang, "refreshed"))
+    slug = (query.data or "").split(":", 1)[-1]
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    symbol = client.symbol_for_slug(slug) or slug.upper().replace("-", "")
+    if query.message:
+        await send_quote_for_symbol(update, context, symbol, edit_message=query.message)
+
+
+async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    action, symbol = (query.data or "watch:").split(":", 1)
+    symbol = symbol.upper()
+    if action == "watch":
+        text = _add_watch(context, query.from_user.id, symbol, lang)
+    else:
+        text = _remove_watch(context, query.from_user.id, symbol, lang)
+    await query.answer(re.sub("<[^>]+>", "", text)[:180])
+    # Refresh keyboard state on the quote message if possible
+    if query.message and query.message.reply_markup:
+        client: CoinMarketCapClient = context.bot_data["cmc_client"]
+        slug = client.resolve_symbol(symbol) or ""
+        quote = client.fetch_quote(slug) if slug else None
+        if quote:
+            watched = symbol in get_watchlist(context, query.from_user.id)
+            await query.message.edit_reply_markup(
+                reply_markup=build_quote_actions_keyboard(
+                    slug, quote.get("id"), symbol, lang, watched=watched
+                )
+            )
+
+
+async def alert_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    symbol = (query.data or "").split(":", 1)[-1].upper()
+    context.user_data["alert_symbol"] = symbol
+    await query.answer()
+    if query.message:
+        await query.message.reply_text(
+            translate(lang, "alert_prompt", symbol=esc(symbol)),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:alert")]]
+            ),
+        )
+    return ALERT_TARGET
+
+
+async def delete_alert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    try:
+        alert_id = int((query.data or "").split(":")[-1])
+    except ValueError:
+        return
+    alerts = get_alerts(context, query.from_user.id)
+    if alerts["items"].pop(alert_id, None) is None:
+        await query.message.reply_text(translate(lang, "alert_missing"), parse_mode=ParseMode.HTML)
+        return
+    await query.message.reply_text(
+        translate(lang, "alert_deleted", alert_id=alert_id), parse_mode=ParseMode.HTML
+    )
+
+
+async def markets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    slug = (query.data or "").split(":", 1)[-1] or None
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    markets = client.fetch_markets(slug) if slug else []
+    if query.message:
+        msg = await query.message.reply_text(
+            format_markets(markets, lang),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+async def news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    coin_id = None
+    parts = (query.data or "").split(":", 1)
+    if len(parts) == 2 and parts[1]:
+        try:
+            coin_id = int(parts[1])
+        except ValueError:
+            coin_id = None
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    text = format_news(client.fetch_news(coin_id), lang)
+    if query.message:
+        msg = await query.message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+async def predictions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    lang = get_user_language(context, query.from_user.id)
+    await query.answer()
+    slug = (query.data or "").split(":", 1)[-1] or None
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    text = format_predictions(client.fetch_predictions(slug), lang)
+    if query.message:
+        msg = await query.message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+        if msg:
+            schedule_delete_message(
+                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
+            )
+
+
+# ---------------------------------------------------------------------------
+# Automation (preserved + polished)
+# ---------------------------------------------------------------------------
 
 
 def schedule_automation(
@@ -539,7 +1188,6 @@ def schedule_automation(
     automations = get_user_automations(context, user_id)
     automation_id = automations["counter"]
     automations["counter"] += 1
-
     interval = PERIOD_SECONDS[period]
     job = context.job_queue.run_repeating(
         send_automation_update,
@@ -574,13 +1222,13 @@ async def send_automation_update(context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = data.get("user_id")
     lang = get_user_language(context, user_id) if user_id else DEFAULT_LANGUAGE
     period_label = get_period_label(lang, period) if period else period
-
     client: CoinMarketCapClient = context.application.bot_data["cmc_client"]
     quote = client.fetch_quote(slug) if slug else None
     if not quote or "stats" not in quote or quote["stats"].get("price") is None:
         msg = await context.bot.send_message(
             chat_id=context.job.chat_id,
-            text=translate(lang, "fetch_unavailable", symbol=symbol),
+            text=translate(lang, "fetch_unavailable", symbol=esc(symbol)),
+            parse_mode=ParseMode.HTML,
         )
         if msg:
             schedule_delete_message(
@@ -588,10 +1236,17 @@ async def send_automation_update(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         return
 
+    watched = False
+    if user_id:
+        watched = symbol in get_watchlist(context, user_id)
     msg = await context.bot.send_message(
         chat_id=context.job.chat_id,
-        text=f"{translate(lang, 'automation_prefix', period=period_label)}\n{format_quote(quote, lang)}",
-        reply_markup=build_quote_actions_keyboard(slug or "", quote.get("id"), lang),
+        text=f"{translate(lang, 'automation_prefix', period=esc(period_label))}\n{format_quote(quote, lang)}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_quote_actions_keyboard(
+            slug or "", quote.get("id"), symbol or "", lang, watched=watched
+        ),
+        disable_web_page_preview=True,
     )
     if msg:
         schedule_delete_message(
@@ -599,226 +1254,19 @@ async def send_automation_update(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-def format_number(value: Optional[float], prefix: str = "", decimals: int = 2) -> str:
-    if value is None:
-        return "?"
-    try:
-        return f"{prefix}{value:,.{decimals}f}"
-    except (TypeError, ValueError):
-        return "?"
-
-
-def format_price(value: Optional[float], prefix: str = "$") -> str:
-    if value is None:
-        return "?"
-    try:
-        dec = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
-        return "?"
-
-    try:
-        if dec <= 0:
-            return f"{prefix}0.00"
-        fixed = format(dec, "f")  # show full precision without scientific notation
-        if "." in fixed:
-            integer, fractional = fixed.split(".", 1)
-        else:
-            integer, fractional = fixed, ""
-        integer_with_commas = f"{int(integer):,}" if integer else "0"
-        return f"{prefix}{integer_with_commas}" + (f".{fractional}" if fractional else "")
-    except (TypeError, ValueError, OverflowError, InvalidOperation):
-        return "?"
-
-
-def format_quote(quote: Dict, lang: str) -> str:
-    stats = quote.get("stats", {})
-    price = format_price(stats.get("price"))
-    change_24h = stats.get("priceChangePercentage24h")
-    market_cap = format_number(stats.get("marketCap"), "$", 0)
-    volume = format_number(stats.get("volume24h"), "$", 0)
-    rank = stats.get("rank")
-
-    labels = get_language_data(lang)
-    change_str = "?" if change_24h is None else f"{change_24h:+.2f}%"
-
-    lines = [
-        f"{quote.get('name')} ({quote.get('symbol')})",
-        f"{labels['quote_price']}: {price}",
-        f"{labels['quote_change']}: {change_str}",
-        f"{labels['quote_marketcap']}: {market_cap}",
-        f"{labels['quote_volume']}: {volume}",
-    ]
-    if rank:
-        lines.append(f"{labels['quote_rank']}: #{rank}")
-    return "\n".join(lines)
-
-
-def build_quote_actions_keyboard(slug: str, coin_id: Optional[int], lang: str) -> InlineKeyboardMarkup:
-    markets_cb = f"markets:{slug}"
-    news_id = str(coin_id) if coin_id is not None else ""
-    news_cb = f"news:{news_id}"
-    predictions_cb = f"predictions:{slug}"
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(translate(lang, "button_markets"), callback_data=markets_cb),
-                InlineKeyboardButton(translate(lang, "button_news"), callback_data=news_cb),
-            ],
-            [InlineKeyboardButton(translate(lang, "button_predictions"), callback_data=predictions_cb)],
-        ]
-    )
-
-
-def format_markets(markets: list, lang: str) -> str:
-    if not markets:
-        return translate(lang, "markets_unavailable")
-    lines = [translate(lang, "markets_header")]
-    for idx, item in enumerate(markets, start=1):
-        exchange = item.get("exchange") or "?"
-        pair = item.get("pair") or ""
-        url = item.get("url") or ""
-        volume = item.get("volume")
-        pair_part = f" ({pair})" if pair else ""
-        volume_part = f" | Vol: {format_number(volume, '$', 0)}" if volume else ""
-        line = f"{idx}. {exchange}{pair_part}{volume_part}"
-        if url:
-            line += f" - {url}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def format_news(news_items: list, lang: str) -> str:
-    if not news_items:
-        return translate(lang, "news_unavailable")
-    lines = [translate(lang, "news_header")]
-    for idx, item in enumerate(news_items, start=1):
-        title = item.get("title") or "Untitled"
-        source = item.get("source")
-        url = item.get("url") or ""
-        line = f"{idx}. {title}"
-        if source:
-            line += f" ({source})"
-        if url:
-            line += f"\n{url}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def format_predictions(prediction_items: list, lang: str) -> str:
-    if not prediction_items:
-        return translate(lang, "predictions_unavailable")
-    lines = [translate(lang, "predictions_header")]
-    for idx, item in enumerate(prediction_items, start=1):
-        title = item.get("title") or "Untitled"
-        source = item.get("source")
-        desc = item.get("description") or ""
-        line = f"{idx}. {title}"
-        if source:
-            line += f" ({source})"
-        if desc:
-            line += f"\n{desc}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = get_user_language(context, update.effective_user.id)
-    if update.message and update.message.text and update.message.text.startswith("/"):
-        schedule_delete_message(
-            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
-        )
-    await update.message.reply_text(
-        translate(lang, "start"),
-        reply_markup=main_menu_keyboard(lang),
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = get_user_language(context, update.effective_user.id)
-    if update.message and update.message.text and update.message.text.startswith("/"):
-        schedule_delete_message(
-            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
-        )
-    await update.message.reply_text(
-        translate(
-            lang,
-            "help",
-            automation=translate(lang, "menu_automation"),
-            manage=translate(lang, "menu_manage"),
-            settings=translate(lang, "menu_settings"),
-        ),
-        reply_markup=main_menu_keyboard(lang),
-    )
-
-
-async def markets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    lang = get_user_language(context, query.from_user.id)
-    await query.answer()
-    parts = (query.data or "").split(":", 1)
-    slug = parts[1] if len(parts) == 2 and parts[1] else None
-
-    client: CoinMarketCapClient = context.bot_data["cmc_client"]
-    markets = client.fetch_markets(slug) if slug else []
-    text = format_markets(markets, lang)
-    if query.message:
-        msg = await query.message.reply_text(text)
-        if msg:
-            schedule_delete_message(
-                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
-            )
-
-
-async def news_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    lang = get_user_language(context, query.from_user.id)
-    await query.answer()
-    parts = (query.data or "").split(":", 1)
-    coin_id: Optional[int] = None
-    if len(parts) == 2 and parts[1]:
-        try:
-            coin_id = int(parts[1])
-        except ValueError:
-            coin_id = None
-
-    client: CoinMarketCapClient = context.bot_data["cmc_client"]
-    news_items = client.fetch_news(coin_id)
-    text = format_news(news_items, lang)
-    if query.message:
-        msg = await query.message.reply_text(text)
-        if msg:
-            schedule_delete_message(
-                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
-            )
-
-
-async def predictions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    lang = get_user_language(context, query.from_user.id)
-    await query.answer()
-    parts = (query.data or "").split(":", 1)
-    slug = parts[1] if len(parts) == 2 and parts[1] else None
-
-    client: CoinMarketCapClient = context.bot_data["cmc_client"]
-    predictions = client.fetch_predictions(slug)
-    text = format_predictions(predictions, lang)
-    if query.message:
-        msg = await query.message.reply_text(text)
-        if msg:
-            schedule_delete_message(
-                context.job_queue, msg.chat_id, msg.message_id, MANUAL_QUOTE_DELETE_SECONDS
-            )
-
-
 async def automation_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lang = get_user_language(context, update.effective_user.id)
     if update.message and update.message.text:
         if update.message.text.startswith("/") or is_menu_button_text(update.message.text):
             schedule_delete_message(
-                context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+                context.job_queue,
+                update.message.chat_id,
+                update.message.message_id,
+                COMMAND_DELETE_SECONDS,
             )
     await update.message.reply_text(
         translate(lang, "automation_prompt"),
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:auto")]]
         ),
@@ -831,30 +1279,41 @@ async def automation_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lang = get_user_language(context, update.effective_user.id)
     symbol = (update.message.text or "").strip().upper()
     if not symbol.isalnum():
-        await update.message.reply_text(translate(lang, "invalid_symbol"))
+        await update.message.reply_text(
+            translate(lang, "invalid_symbol"), parse_mode=ParseMode.HTML
+        )
         return AUTO_SYMBOL
 
     slug = client.resolve_symbol(symbol)
     if not slug:
-        await update.message.reply_text(translate(lang, "symbol_not_found", symbol=symbol))
+        await update.message.reply_text(
+            translate(lang, "symbol_not_found_plain", symbol=esc(symbol)),
+            parse_mode=ParseMode.HTML,
+        )
         return AUTO_SYMBOL
 
     context.user_data["auto_symbol"] = symbol
     context.user_data["auto_slug"] = slug
-
     keyboard = [
         [
-            InlineKeyboardButton(f"⏱️ {get_period_label(lang, 'hourly')}", callback_data="new:hourly"),
+            InlineKeyboardButton(
+                f"⏱️ {get_period_label(lang, 'hourly')}", callback_data="new:hourly"
+            ),
             InlineKeyboardButton(f"☀️ {get_period_label(lang, 'daily')}", callback_data="new:daily"),
         ],
         [
-            InlineKeyboardButton(f"📅 {get_period_label(lang, 'weekly')}", callback_data="new:weekly"),
-            InlineKeyboardButton(f"🗓️ {get_period_label(lang, 'monthly')}", callback_data="new:monthly"),
+            InlineKeyboardButton(
+                f"📅 {get_period_label(lang, 'weekly')}", callback_data="new:weekly"
+            ),
+            InlineKeyboardButton(
+                f"🗓️ {get_period_label(lang, 'monthly')}", callback_data="new:monthly"
+            ),
         ],
         [InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:auto")],
     ]
     await update.message.reply_text(
-        translate(lang, "choose_frequency", symbol=symbol),
+        translate(lang, "choose_frequency", symbol=esc(symbol)),
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return AUTO_PERIOD
@@ -864,117 +1323,109 @@ async def automation_period_selection(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     lang = get_user_language(context, query.from_user.id)
     await query.answer()
-    parts = (query.data or "").split(":")
-    if len(parts) != 2:
-        await query.edit_message_text(translate(lang, "invalid_selection"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+    period = (query.data or "").split(":", 1)[-1]
+    if period not in PERIOD_SECONDS:
+        await query.edit_message_text(
+            translate(lang, "invalid_period"), parse_mode=ParseMode.HTML
+        )
         return ConversationHandler.END
 
-    period = parts[1]
     symbol = context.user_data.get("auto_symbol")
     slug = context.user_data.get("auto_slug")
-    if not symbol or not slug or period not in PERIOD_SECONDS:
-        await query.edit_message_text(translate(lang, "missing_data"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+    if not symbol or not slug:
+        await query.edit_message_text(
+            translate(lang, "missing_data"), parse_mode=ParseMode.HTML
+        )
         return ConversationHandler.END
 
     automation_id = schedule_automation(
-        context=context,
-        user_id=query.from_user.id,
-        chat_id=query.message.chat_id,
-        slug=slug,
-        symbol=symbol,
-        period=period,
-        )
+        context, query.from_user.id, query.message.chat_id, slug, symbol, period
+    )
     await query.edit_message_text(
         translate(
             lang,
             "automation_created",
-            symbol=symbol,
+            symbol=esc(symbol),
             period=get_period_label(lang, period),
             automation_id=automation_id,
             manage_label=translate(lang, "menu_manage"),
-        )
+        ),
+        parse_mode=ParseMode.HTML,
     )
-    if query.message:
-        schedule_delete_message(
-            context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-        )
+    context.user_data.pop("auto_symbol", None)
+    context.user_data.pop("auto_slug", None)
     return ConversationHandler.END
 
 
-def build_manage_keyboard(user_id: int, context: ContextTypes.DEFAULT_TYPE, lang: str) -> InlineKeyboardMarkup:
-    automations = get_user_automations(context, user_id)["items"]
+def build_manage_keyboard(
+    user_id: int, context: ContextTypes.DEFAULT_TYPE, lang: str
+) -> InlineKeyboardMarkup:
+    automations = get_user_automations(context, user_id)
     rows = []
-    for automation_id, item in automations.items():
+    for automation_id, item in automations["items"].items():
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"🗑️ {translate(lang, 'delete_button', automation_id=automation_id, symbol=item['symbol'])}",
+                    translate(
+                        lang,
+                        "delete_button",
+                        automation_id=automation_id,
+                        symbol=item["symbol"],
+                    ),
                     callback_data=f"del:{automation_id}",
                 )
             ]
         )
         rows.append(
             [
-                InlineKeyboardButton(
-                    f"⏱️ {get_period_label(lang, 'hourly')}", callback_data=f"set:{automation_id}:hourly"
-                ),
-                InlineKeyboardButton(
-                    f"☀️ {get_period_label(lang, 'daily')}", callback_data=f"set:{automation_id}:daily"
-                ),
-                InlineKeyboardButton(
-                    f"📅 {get_period_label(lang, 'weekly')}", callback_data=f"set:{automation_id}:weekly"
-                ),
-                InlineKeyboardButton(
-                    f"🗓️ {get_period_label(lang, 'monthly')}", callback_data=f"set:{automation_id}:monthly"
-                ),
+                InlineKeyboardButton("1h", callback_data=f"set:{automation_id}:hourly"),
+                InlineKeyboardButton("1d", callback_data=f"set:{automation_id}:daily"),
+                InlineKeyboardButton("1w", callback_data=f"set:{automation_id}:weekly"),
+                InlineKeyboardButton("1m", callback_data=f"set:{automation_id}:monthly"),
             ]
         )
-    if rows:
-        rows.append([InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:manage")])
-    return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
+    rows.append(
+        [InlineKeyboardButton(translate(lang, "cancel_button"), callback_data="cancel:manage")]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 async def manage_automation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    lang = get_user_language(context, user_id)
-    if update.message and update.message.text:
-        if update.message.text.startswith("/") or is_menu_button_text(update.message.text):
-            schedule_delete_message(
-                context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
-            )
-    data = get_user_automations(context, user_id)
-    items = data["items"]
-    if not items:
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
+    automations = get_user_automations(context, update.effective_user.id)
+    if not automations["items"]:
         await update.message.reply_text(
-            translate(lang, "no_automations", automation_label=translate(lang, "menu_automation")),
+            translate(
+                lang,
+                "no_automations",
+                automation_label=translate(lang, "menu_automation"),
+            ),
+            parse_mode=ParseMode.HTML,
             reply_markup=main_menu_keyboard(lang),
         )
         return
 
     lines = [translate(lang, "automation_list_header")]
-    for automation_id, item in items.items():
-        every_hours = PERIOD_SECONDS[item["period"]] // 3600
+    for automation_id, item in automations["items"].items():
+        hours = max(1, PERIOD_SECONDS[item["period"]] // 3600)
         lines.append(
             translate(
                 lang,
                 "automation_line",
                 automation_id=automation_id,
-                symbol=item["symbol"],
+                symbol=esc(item["symbol"]),
                 period=get_period_label(lang, item["period"]),
-                every_hours=every_hours,
+                every_hours=hours,
             )
         )
     await update.message.reply_text(
         "\n".join(lines),
-        reply_markup=build_manage_keyboard(user_id, context, lang),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_manage_keyboard(update.effective_user.id, context, lang),
     )
 
 
@@ -982,147 +1433,103 @@ async def manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     lang = get_user_language(context, query.from_user.id)
     await query.answer()
-    data = query.data or ""
-    parts = data.split(":")
-    if not parts or parts[0] not in {"del", "set"}:
-        await query.edit_message_text(translate(lang, "invalid_action"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+    parts = (query.data or "").split(":")
+    if len(parts) < 2:
         return
-
-    user_id = query.from_user.id
-    automations = get_user_automations(context, user_id)
-    items = automations["items"]
-
+    action = parts[0]
     try:
         automation_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.edit_message_text(translate(lang, "invalid_id"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+    except ValueError:
+        await query.message.reply_text(translate(lang, "invalid_id"), parse_mode=ParseMode.HTML)
         return
 
-    if automation_id not in items:
-        await query.edit_message_text(translate(lang, "automation_missing"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
-        return
-
-    if parts[0] == "del":
-        cancel_automation(context, user_id, automation_id)
-        await query.edit_message_text(
+    if action == "del":
+        ok = cancel_automation(context, query.from_user.id, automation_id)
+        text = (
             translate(lang, "deleted_automation", automation_id=automation_id)
+            if ok
+            else translate(lang, "automation_missing")
         )
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML)
         return
 
-    if parts[0] == "set":
-        if len(parts) < 3 or parts[2] not in PERIOD_SECONDS:
-            await query.edit_message_text(translate(lang, "invalid_period"))
-            if query.message:
-                schedule_delete_message(
-                    context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-                )
-            return
+    if action == "set" and len(parts) == 3:
         period = parts[2]
-        item = items[automation_id]
-        item["job"].schedule_removal()
-        interval = PERIOD_SECONDS[period]
-        job = context.job_queue.run_repeating(
-            send_automation_update,
-            interval=interval,
-            data={
-                "slug": item["slug"],
-                "symbol": item["symbol"],
-                "user_id": user_id,
-                "period": period,
-            },
-            chat_id=query.message.chat_id,
-            name=f"auto-{user_id}-{automation_id}",
+        if period not in PERIOD_SECONDS:
+            await query.message.reply_text(
+                translate(lang, "invalid_period"), parse_mode=ParseMode.HTML
+            )
+            return
+        automations = get_user_automations(context, query.from_user.id)
+        item = automations["items"].get(automation_id)
+        if not item:
+            await query.message.reply_text(
+                translate(lang, "automation_missing"), parse_mode=ParseMode.HTML
+            )
+            return
+        cancel_automation(context, query.from_user.id, automation_id)
+        # Preserve id by manually reinserting with same id
+        new_id = schedule_automation(
+            context,
+            query.from_user.id,
+            query.message.chat_id,
+            item["slug"],
+            item["symbol"],
+            period,
         )
-        item["period"] = period
-        item["job"] = job
-        await query.edit_message_text(
+        # Move to original id for stable references
+        created = automations["items"].pop(new_id)
+        automations["items"][automation_id] = created
+        automations["counter"] = max(automations["counter"], automation_id + 1)
+        await query.message.reply_text(
             translate(
                 lang,
                 "updated_period",
                 automation_id=automation_id,
                 period=get_period_label(lang, period),
-            )
+            ),
+            parse_mode=ParseMode.HTML,
         )
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
-
-
-def build_language_keyboard(current_lang: str) -> InlineKeyboardMarkup:
-    rows = []
-    for code, meta in LANGUAGE_OPTIONS.items():
-        prefix = "✅ " if code == current_lang else ""
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"{prefix}{meta['emoji']} {meta['label']}", callback_data=f"lang:{code}"
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton(translate(current_lang, "cancel_button"), callback_data="cancel:lang")])
-    return InlineKeyboardMarkup(rows)
 
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    lang = get_user_language(context, user_id)
-    if update.message and update.message.text:
-        if update.message.text.startswith("/") or is_menu_button_text(update.message.text):
-            schedule_delete_message(
-                context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
-            )
+    lang = get_user_language(context, update.effective_user.id)
+    if update.message:
+        schedule_delete_message(
+            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        )
     await update.message.reply_text(
-        translate(lang, "language_prompt"), reply_markup=build_language_keyboard(lang)
+        translate(lang, "language_prompt"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_language_keyboard(lang),
     )
 
 
 async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    parts = (query.data or "").split(":")
     await query.answer()
-
+    parts = (query.data or "").split(":", 1)
     if len(parts) != 2 or parts[1] not in LANGUAGE_OPTIONS:
-        await query.edit_message_text(translate(DEFAULT_LANGUAGE, "invalid_language"))
-        if query.message:
-            schedule_delete_message(
-                context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
-            )
+        await query.edit_message_text(
+            translate(DEFAULT_LANGUAGE, "invalid_language"), parse_mode=ParseMode.HTML
+        )
         return
-
     lang = set_user_language(context, query.from_user.id, parts[1])
+    meta = LANGUAGE_OPTIONS[lang]
     await query.edit_message_text(
-        translate(lang, "language_prompt"),
-        reply_markup=build_language_keyboard(lang),
-    )
-    await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text=translate(
+        translate(
             lang,
             "language_updated",
-            language=f"{LANGUAGE_OPTIONS[lang]['emoji']} {LANGUAGE_OPTIONS[lang]['label']}",
+            language=f"{meta['emoji']} {meta['label']}",
         ),
-        reply_markup=main_menu_keyboard(lang),
+        parse_mode=ParseMode.HTML,
     )
     if query.message:
-        schedule_delete_message(
-            context.job_queue, query.message.chat_id, query.message.message_id, MENU_DELETE_SECONDS
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=translate(lang, "start"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(lang),
         )
 
 
@@ -1130,77 +1537,76 @@ async def cancel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     query = update.callback_query
     lang = get_user_language(context, query.from_user.id)
     await query.answer()
+    context.user_data.pop("alert_symbol", None)
+    context.user_data.pop("auto_symbol", None)
+    context.user_data.pop("auto_slug", None)
     if query.message:
         try:
-            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
-        except Exception as exc:
-            logger.debug("Failed to delete menu message: %s", exc)
-    ack = await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text=translate(lang, "cancelled"),
-        reply_markup=main_menu_keyboard(lang),
-    )
-    if ack:
-        schedule_delete_message(
-            context.job_queue, ack.chat_id, ack.message_id, MENU_DELETE_SECONDS
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id, message_id=query.message.message_id
+            )
+        except Exception:
+            pass
+        ack = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=translate(lang, "cancelled"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(lang),
         )
+        if ack:
+            schedule_delete_message(
+                context.job_queue, ack.chat_id, ack.message_id, MENU_DELETE_SECONDS
+            )
     return ConversationHandler.END
 
 
 async def automation_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lang = get_user_language(context, update.effective_user.id)
-    if update.message and update.message.text and update.message.text.startswith("/"):
-        schedule_delete_message(
-            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
-        )
+    maybe_delete_command(update, context)
     await update.message.reply_text(
-        translate(lang, "automation_cancelled"), reply_markup=main_menu_keyboard(lang)
+        translate(lang, "automation_cancelled"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_keyboard(lang),
     )
     return ConversationHandler.END
 
 
-async def handle_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+# ---------------------------------------------------------------------------
+# Free-text router
+# ---------------------------------------------------------------------------
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
-    lang = get_user_language(context, update.effective_user.id)
+    if not text or is_menu_button_text(text):
+        return
     if text.startswith("/"):
-        schedule_delete_message(
-            context.job_queue, update.message.chat_id, update.message.message_id, COMMAND_DELETE_SECONDS
+        maybe_delete_command(update, context)
+        return
+
+    # Converter shorthand: "1.5 ETH"
+    match = CONVERT_RE.match(text)
+    if match:
+        await _send_conversion(
+            update, context, float(match.group("amount")), match.group("symbol").upper()
         )
-    # Ignore menu button texts here; they are handled elsewhere.
-    if is_menu_button_text(text):
         return
 
-    symbol = text.upper()
-    if not symbol.isalnum():
-        await update.message.reply_text(translate(lang, "invalid_symbol"))
-        return
-
-    await update.message.chat.send_action(action=ChatAction.TYPING)
-
-    slug = client.resolve_symbol(symbol)
-    if not slug:
+    # Symbol or name search
+    token = text.split()[0]
+    clean = re.sub(r"[^A-Za-z0-9]", "", token)
+    if not clean:
+        lang = get_user_language(context, update.effective_user.id)
         await update.message.reply_text(
-        translate(lang, "symbol_not_found", symbol=symbol)
+            translate(lang, "invalid_symbol"), parse_mode=ParseMode.HTML
         )
         return
+    await send_quote_for_symbol(update, context, clean)
 
-    quote = client.fetch_quote(slug)
-    if not quote or "stats" not in quote or quote["stats"].get("price") is None:
-        await update.message.reply_text(translate(lang, "manual_fetch_fail"))
-        return
 
-    reply = await update.message.reply_text(
-        format_quote(quote, lang),
-        reply_markup=build_quote_actions_keyboard(slug, quote.get("id"), lang),
-    )
-    if reply:
-        schedule_delete_message(
-            context.job_queue,
-            reply.chat_id,
-            reply.message_id,
-            MANUAL_QUOTE_DELETE_SECONDS,
-        )
+# ---------------------------------------------------------------------------
+# App wiring
+# ---------------------------------------------------------------------------
 
 
 def build_application(token: str) -> Application:
@@ -1212,7 +1618,11 @@ def build_application(token: str) -> Application:
     automation_pattern = button_regex("menu_automation")
     manage_pattern = button_regex("menu_manage")
     settings_pattern = button_regex("menu_settings")
-    menu_pattern = combined_button_regex(["menu_automation", "menu_manage", "menu_settings"])
+    search_pattern = button_regex("menu_search")
+    discover_pattern = button_regex("menu_discover")
+    watchlist_pattern = button_regex("menu_watchlist")
+    alerts_pattern = button_regex("menu_alerts")
+    menu_pattern = combined_button_regex(MENU_KEYS)
 
     automation_conv = ConversationHandler(
         entry_points=[
@@ -1230,30 +1640,114 @@ def build_application(token: str) -> Application:
             ],
         },
         fallbacks=[CommandHandler("cancel", automation_cancel)],
+        allow_reentry=True,
+        per_message=False,
+    )
+
+    alert_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(alert_ui_callback, pattern="^alertui:")],
+        states={
+            ALERT_TARGET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, alert_target_message),
+                CallbackQueryHandler(cancel_menu, pattern="^cancel:"),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", automation_cancel)],
+        allow_reentry=True,
+        per_message=False,
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("price", price_command))
+    application.add_handler(CommandHandler("p", price_command))
+    application.add_handler(CommandHandler("compare", compare_command))
+    application.add_handler(CommandHandler("convert", convert_command))
+    application.add_handler(CommandHandler("watchlist", watchlist_command))
+    application.add_handler(CommandHandler("watch", watch_command))
+    application.add_handler(CommandHandler("unwatch", unwatch_command))
+    application.add_handler(CommandHandler("alerts", alerts_command))
+    application.add_handler(CommandHandler("alert", alert_command))
     application.add_handler(CommandHandler("settings", settings_menu))
-    application.add_handler(MessageHandler(filters.Regex(settings_pattern), settings_menu))
     application.add_handler(CommandHandler("manageautomation", manage_automation))
+    application.add_handler(CommandHandler("trending", trending_command))
+    application.add_handler(CommandHandler("gainers", gainers_command))
+    application.add_handler(CommandHandler("losers", losers_command))
+
+    application.add_handler(MessageHandler(filters.Regex(search_pattern), search_menu))
+    application.add_handler(MessageHandler(filters.Regex(discover_pattern), discover_menu))
+    application.add_handler(MessageHandler(filters.Regex(watchlist_pattern), watchlist_command))
+    application.add_handler(MessageHandler(filters.Regex(alerts_pattern), alerts_command))
+    application.add_handler(MessageHandler(filters.Regex(settings_pattern), settings_menu))
     application.add_handler(MessageHandler(filters.Regex(manage_pattern), manage_automation))
+
     application.add_handler(automation_conv)
+    application.add_handler(alert_conv)
+
+    application.add_handler(CallbackQueryHandler(discover_callback, pattern="^discover:"))
+    application.add_handler(CallbackQueryHandler(quote_callback, pattern="^quote:"))
+    application.add_handler(CallbackQueryHandler(refresh_callback, pattern="^refresh:"))
+    application.add_handler(CallbackQueryHandler(watch_callback, pattern="^(watch|unwatch):"))
+    application.add_handler(CallbackQueryHandler(delete_alert_callback, pattern="^adel:"))
     application.add_handler(CallbackQueryHandler(markets_callback, pattern="^markets:"))
     application.add_handler(CallbackQueryHandler(news_callback, pattern="^news:"))
     application.add_handler(CallbackQueryHandler(predictions_callback, pattern="^predictions:"))
     application.add_handler(CallbackQueryHandler(manage_callback, pattern="^(del|set):"))
     application.add_handler(CallbackQueryHandler(language_callback, pattern="^lang:"))
     application.add_handler(CallbackQueryHandler(cancel_menu, pattern="^cancel:"))
-    application.add_handler(CallbackQueryHandler(language_callback, pattern="^lang:"))
+
     application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_pattern),
-            handle_symbol,
-        )
+        MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_pattern), handle_text)
     )
 
+    # Periodic alert checker (works while the process is warm)
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            check_price_alerts,
+            interval=ALERT_CHECK_SECONDS,
+            first=30,
+            name="price-alert-checker",
+        )
+
     return application
+
+
+async def _discover_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str) -> None:
+    """Shared formatter for /gainers /losers /trending."""
+    maybe_delete_command(update, context)
+    lang = get_user_language(context, update.effective_user.id)
+    client: CoinMarketCapClient = context.bot_data["cmc_client"]
+    if kind == "gainers":
+        items = client.fetch_movers("percent_change_24h", limit=10)
+        text = format_movers(items, lang, "gainers_header")
+    elif kind == "losers":
+        items = client.fetch_movers("percent_change_24h:asc", limit=10)
+        text = format_movers(items, lang, "losers_header")
+    else:
+        items = client.fetch_movers("volume_24h", limit=10)
+        text = format_movers(items, lang, "trending_header")
+    rows = [
+        [InlineKeyboardButton(f"Open {item.get('symbol')}", callback_data=f"quote:{item.get('symbol')}")]
+        for item in items[:5]
+        if item.get("symbol")
+    ]
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+    )
+
+
+async def gainers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _discover_cmd(update, context, "gainers")
+
+
+async def losers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _discover_cmd(update, context, "losers")
+
+
+async def trending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _discover_cmd(update, context, "trending")
 
 
 def load_settings() -> Dict[str, object]:
@@ -1286,7 +1780,6 @@ def main() -> None:
     port = settings["port"]
 
     application = build_application(token)
-
     logger.info("Bot is starting in %s mode", "webhook" if use_webhook else "polling")
 
     if use_webhook:
