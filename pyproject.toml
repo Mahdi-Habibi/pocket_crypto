@@ -1,0 +1,11 @@
+[project]
+name = "pocket-crypto"
+version = "1.0.0"
+description = "Currency & Crypto Telegram bot webhook for Vercel"
+requires-python = ">=3.12"
+dependencies = [
+  "python-telegram-bot==21.4",
+  "requests==2.32.3",
+  "python-dotenv==1.0.1",
+  "apscheduler==3.10.4",
+]

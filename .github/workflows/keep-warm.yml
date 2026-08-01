@@ -1,0 +1,24 @@
+name: Keep Vercel webhook warm
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping production webhook health endpoint
+        run: |
+          set -euo pipefail
+          for url in \
+            "https://cryptoinyourpocketbot.vercel.app/api/webhook" \
+            "https://pocketcrypto.vercel.app/api/webhook"
+          do
+            echo "Pinging ${url}"
+            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" "$url" || true)
+            echo "status=${code}"
+            head -c 200 /tmp/body.txt || true
+            echo
+          done

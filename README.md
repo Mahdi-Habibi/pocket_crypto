@@ -3,71 +3,66 @@
 Python Telegram bot that fetches live currency/crypto info from CoinMarketCap. Users start the bot, enter a symbol (e.g., `BTC`, `USDT`, `TON`), and receive price, market cap, and daily change. They can immediately ask for another symbol without restarting.
 
 ## Prerequisites
-- Python 3.10+
+- Python 3.12+
 - Telegram bot token (via [@BotFather](https://t.me/BotFather))
-- Optional: ngrok (for webhook mode)
 
 ## Setup
 1) Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-2) Configure secrets (either set env vars or create `.env` in the `bot/` folder):
+2) Configure secrets (copy `.env.example` to `.env` and fill values, or export env vars):
 ```bash
-# PowerShell
-$env:TELEGRAM_BOT_TOKEN="your-telegram-token-here"
-$env:USE_WEBHOOK="true"
-$env:WEBHOOK_BASE_URL="https://<your-ngrok-or-vercel-domain>"
-$env:WEBHOOK_PATH="/api/webhook" # default for Vercel
-$env:PORT="8080"
-# bash
 export TELEGRAM_BOT_TOKEN="your-telegram-token-here"
 export USE_WEBHOOK="true"
-export WEBHOOK_BASE_URL="https://<your-ngrok-or-vercel-domain>"
+export WEBHOOK_BASE_URL="https://cryptoinyourpocketbot.vercel.app"
 export WEBHOOK_PATH="/api/webhook"
 export PORT="8080"
-# or copy .env.example to .env and fill TELEGRAM_BOT_TOKEN
 ```
-3) Run the bot (polling, simplest):
+3) Run the bot locally (polling):
 ```bash
-python main.py
-```
-
-### Webhook mode with ngrok
-1) Install ngrok and start a tunnel:
-```bash
-ngrok http http://localhost:8080
-```
-Note the `https://...ngrok-free.app` forwarding URL.
-2) Set env vars (PowerShell shown):
-```bash
-$env:TELEGRAM_BOT_TOKEN="your-telegram-token-here"
-$env:USE_WEBHOOK="true"
-$env:WEBHOOK_BASE_URL="https://<your-ngrok-domain>"
-$env:WEBHOOK_PATH="/webhook" # optional; defaults to /api/webhook
-$env:PORT="8080"
-```
-3) Run:
-```bash
-python main.py
+python bot.py
 ```
 
 ## Deploy to Vercel (webhook)
-The repo includes `api/webhook.py`, a Vercel-compatible Python function.
+The repo includes `api/webhook.py`, a Vercel Python serverless function.
 
-1) Set env vars in Vercel:
-   - `TELEGRAM_BOT_TOKEN`
-   - `USE_WEBHOOK` = `true`
-   - `WEBHOOK_BASE_URL` = `https://<your-project>.vercel.app`
-   - `WEBHOOK_PATH` = `/api/webhook` (optional; this is the default)
-2) Deploy to Vercel; the webhook will be available at `https://<your-project>.vercel.app/api/webhook`.
-3) If Telegram does not receive updates automatically, set the webhook once:
+### Required Vercel environment variables
+Set these in the Vercel project **Settings → Environment Variables** for Production:
+
+| Name | Value | Notes |
+|------|-------|-------|
+| `TELEGRAM_BOT_TOKEN` | *(from BotFather)* | Mark as **Sensitive** |
+| `USE_WEBHOOK` | `true` | |
+| `WEBHOOK_BASE_URL` | `https://cryptoinyourpocketbot.vercel.app` | Must match the project domain |
+| `WEBHOOK_PATH` | `/api/webhook` | Optional (default) |
+
+After changing env vars, **redeploy** Production so the new values are picked up.
+
+### Rotate `TELEGRAM_BOT_TOKEN` (Vercel “Needs attention”)
+If Vercel flags `TELEGRAM_BOT_TOKEN` for rotation (security incident or leaked secret):
+
+1. Open [@BotFather](https://t.me/BotFather) → `/mybots` → **CryptoInYourPocketbot** → **API Token** → **Revoke current token**.
+2. Copy the new token.
+3. In Vercel → Project → Settings → Environment Variables:
+   - Edit `TELEGRAM_BOT_TOKEN`, paste the new value
+   - Enable **Sensitive**
+   - Save for Production (and Preview if used)
+4. Redeploy Production.
+5. Point Telegram at the webhook:
    ```bash
-   curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-     -d "url=https://<your-project>.vercel.app/api/webhook"
+   export TELEGRAM_BOT_TOKEN="new-token"
+   export WEBHOOK_BASE_URL="https://cryptoinyourpocketbot.vercel.app"
+   ./scripts/set_webhook.sh
    ```
+6. Verify: `curl https://cryptoinyourpocketbot.vercel.app/api/webhook` should return `ok`.
 
-> Serverless caveat: Vercel functions can sleep between requests. Automations and scheduled jobs need the function to stay warm (Vercel Pro “Always On” helps).
+> Never commit real tokens. A previous `.env` commit exposed a bot token in git history; always rotate after any leak.
+
+### Production URL
+Webhook endpoint: `https://cryptoinyourpocketbot.vercel.app/api/webhook`
+
+If you use the `pocketcrypto.vercel.app` alias, set `WEBHOOK_BASE_URL` to that domain instead and run `scripts/set_webhook.sh` again.
 
 ## Usage
 - `/start` — Greets, then prompts for a symbol.
@@ -78,4 +73,5 @@ The repo includes `api/webhook.py`, a Vercel-compatible Python function.
 
 ## Notes
 - Data is scraped from public CoinMarketCap endpoints; no API key required.
-- Symbols are matched against the latest CoinMarketCap listings (top 5000 by market cap). If a symbol is ambiguous/missing, the bot will say it wasn't found.
+- Symbols are matched against the latest CoinMarketCap listings (top 5000 by market cap).
+- Serverless caveat: in-memory automations reset when the function goes cold. An hourly cron/`keep-warm` workflow pings the health endpoint to reduce cold starts.
