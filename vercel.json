@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/webhook.py": {
+      "maxDuration": 30,
+      "excludeFiles": "{datetime_log.txt,.github/**,**/__pycache__/**,**/*.pyc,**/*.md}"
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/webhook",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}
